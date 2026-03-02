@@ -8,10 +8,10 @@ __pycache__/
 ruff_cache/
 build/
 dist/
-.tmp/
-runs/
-datasets/
-raw_data/
-models/
-metrics.json
-results_comparison/
+/.tmp/
+/runs/
+/datasets/
+/raw_data/
+/models/
+/metrics.json
+/results_comparison/
