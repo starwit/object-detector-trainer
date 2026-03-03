@@ -520,16 +520,9 @@ def train_rtmdet_backend(
                 optimizer["lr"] = float(resolved_cfg["rtmdet_lr"])
 
     runner = Runner.from_cfg(cfg)
-    # PyTorch ≥2.6 changed weights_only default from False to True.  RTMDet
-    # checkpoints bundle mmengine HistoryBuffer objects which are not in the
-    # default safe-globals allow-list, causing torch.load to reject them.
-    # Register the class explicitly before training so the checkpoint loads.
-    try:
-        from mmengine.logging.history_buffer import HistoryBuffer as _HistoryBuffer  # type: ignore
-
-        torch.serialization.add_safe_globals([_HistoryBuffer])
-    except (ImportError, AttributeError):
-        pass
+    if hasattr(torch.serialization, "add_safe_globals"):
+        from mmengine.logging.history_buffer import HistoryBuffer
+        torch.serialization.add_safe_globals([HistoryBuffer])
     runner.train()
     # Explicitly release the Runner so fork-based dataloader workers are
     # cleaned up while the interpreter is still healthy.  Without this,
