@@ -174,6 +174,21 @@ def test_heavy_e2e_rfdetr_one_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert list(runs_rfdetr.glob("**/weights/best.pt")), "Expected RF-DETR weights/best.pt"
 
 
+def _require_mim() -> None:
+    """Skip test if openmim is not installed or mmcv compiled ops are unavailable."""
+    import shutil
+
+    if not shutil.which("mim"):
+        pytest.skip("openmim not installed; install openmim to run RTMDet download tests.")
+    try:
+        import mmcv._ext  # type: ignore  # noqa: F401
+    except Exception as exc:  # pragma: no cover - exercised in heavy environments
+        pytest.skip(
+            "Heavy test prerequisite missing: full mmcv ops are unavailable "
+            f"(install `mmcv`, not `mmcv-lite`; got {exc})."
+        )
+
+
 def _require_rtmdet_config(filename: str = "rtmdet_tiny_8xb32-300e_coco.py") -> Path:
     """Resolve RTMDet config from installed mmdet package, or skip if unavailable."""
     try:
@@ -226,6 +241,62 @@ def test_heavy_e2e_rtmdet_one_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPa
                     "batch_size": 1,
                     "image_size": 128,
                     "allow_download": False,
+                }
+            },
+            "evaluation": {
+                "baseline_weights_path": str(yolo_ckpt),
+            },
+        },
+    )
+
+    args = build_args(dataset_name)
+    run_prepare_stage(args)
+    run_train_eval_stage(args)
+
+    _assert_common_pipeline_artifacts(tmp_path, dataset_name)
+    runs_rtmdet = tmp_path / "runs" / "rtmdet"
+    assert runs_rtmdet.exists()
+    assert list(runs_rtmdet.glob("**/weights/best.pt")), "Expected RTMDet weights/best.pt"
+
+
+def test_heavy_e2e_rtmdet_download_and_train(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run RTMDet training/evaluation using config_name + allow_download=True.
+
+    Exercises the full mim-download path (config + checkpoint from the mmdet
+    package index).  Any failure in the download — wrong package name, bad config
+    identifier, network error — surfaces here instead of being hidden by stubs.
+
+    Skipped when openmim is not installed or compiled mmcv ops are unavailable.
+    """
+    _require_mim()
+    monkeypatch.chdir(tmp_path)
+
+    yolo_ckpt = _require_repo_weight("yolov8n.pt")
+    dataset_name = "heavy_e2e_rtmdet_download"
+    cache_dir = tmp_path / "models" / "pretrained" / "rtmdet"
+
+    create_minimal_dataset(tmp_path)
+    write_params_yaml(
+        tmp_path,
+        {
+            "data": {"dataset_name": dataset_name},
+            "train": {
+                "model": "rtmdet-tiny",
+                "image_size": 128,
+                "epochs": 1,
+                "batch_size": 1,
+            },
+            "models": {
+                "rtmdet-tiny": {
+                    "backend": "rtmdet",
+                    "config_name": "rtmdet_tiny_8xb32-300e_coco",
+                    "epochs": 1,
+                    "batch_size": 1,
+                    "image_size": 128,
+                    "cache_dir": str(cache_dir),
+                    "allow_download": True,
                 }
             },
             "evaluation": {
