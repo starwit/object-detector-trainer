@@ -520,10 +520,13 @@ def train_rtmdet_backend(
                 optimizer["lr"] = float(resolved_cfg["rtmdet_lr"])
 
     runner = Runner.from_cfg(cfg)
-    if hasattr(torch.serialization, "add_safe_globals"):
-        from mmengine.logging.history_buffer import HistoryBuffer
-        torch.serialization.add_safe_globals([HistoryBuffer])
-    runner.train()
+    # mmengine 0.10.x predates the PyTorch 2.6 weights_only=True default and
+    # calls torch.load without that argument.  Override for the training call.
+    _orig_load, torch.load = torch.load, lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+    try:
+        runner.train()
+    finally:
+        torch.load = _orig_load
     # Explicitly release the Runner so fork-based dataloader workers are
     # cleaned up while the interpreter is still healthy.  Without this,
     # MMEngine's worker queues are collected during Python shutdown, which
