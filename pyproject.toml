@@ -44,12 +44,14 @@ dev = [
 ]
 
 [project.scripts]
-object-detector-trainer = "trainer_core.cli:main"
+object-detector-trainer = "object_detector_trainer.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["trainer_core*"]
+include = ["object_detector_trainer*"]
 
 [tool.pytest.ini_options]
 markers = [
   "heavy: opt-in integration tests (slower and/or environment-sensitive)",
 ]
+testpaths = ["object_detector_trainer/tests"]
+norecursedirs = [".venv", "venv", "site-packages"]
