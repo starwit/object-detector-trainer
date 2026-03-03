@@ -41,6 +41,10 @@ def apply_subset_sampling(
         )
         return pairs
 
+    if subset_ratio == 0 or subset_ratio == 0.0:
+        print(f"Folder '{folder_name}': Excluded (ratio=0)")
+        return []
+
     if isinstance(subset_ratio, float) and 0 < subset_ratio < 1:
         original_count = len(pairs)
         pairs_copy = pairs.copy()
@@ -114,8 +118,8 @@ def resolve_folder_subsets(
     for folder_name, ratio_str in cli_overrides:
         try:
             ratio = float(ratio_str)
-            if ratio <= 0:
-                print(f"  Warning: Invalid ratio {ratio} for {folder_name}. Must be > 0.")
+            if ratio < 0:
+                print(f"  Warning: Invalid ratio {ratio} for {folder_name}. Must be >= 0.")
                 continue
             resolved[folder_name] = ratio
             suffix = " (oversampling)" if ratio > 1 else ""

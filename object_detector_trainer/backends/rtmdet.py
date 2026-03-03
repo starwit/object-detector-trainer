@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import shutil
@@ -13,6 +14,35 @@ from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
 from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_mmengine_singletons() -> None:
+    """Close MMEngine global singletons so their file handles / log queues are
+    released eagerly, before the GC or interpreter shutdown races with them.
+
+    MMEngine stores logger, message-hub, and scope instances in class-level
+    OrderedDicts (ManagerMixin._instance_dict).  Clearing those dicts makes the
+    objects available for immediate GC instead of living until process exit,
+    which would otherwise leave QueueFeederThread / Connection file descriptors
+    open past the point where they are still valid.
+    """
+    try:
+        from mmengine.logging.logger import MMLogger
+        from mmengine.logging.message_hub import MessageHub
+        from mmengine.registry.default_scope import DefaultScope
+    except ImportError:
+        return
+
+    for inst in list(MMLogger._instance_dict.values()):
+        for handler in list(inst.handlers):
+            try:
+                handler.close()
+            except Exception:
+                pass
+            inst.removeHandler(handler)
+    MMLogger._instance_dict.clear()
+    MessageHub._instance_dict.clear()
+    DefaultScope._instance_dict.clear()
 
 
 def _iter_image_files(images_dir: Path) -> list[Path]:
@@ -157,7 +187,7 @@ def _download_rtmdet_assets(config_name: str, cache_dir: Path) -> None:
     cmd = [
         "mim",
         "download",
-        "rtmdet",
+        "mmdet",
         "--config",
         str(config_name),
         "--dest",
@@ -213,7 +243,7 @@ def _resolve_rtmdet_assets(
             if not matches:
                 raise FileNotFoundError(
                     f"Could not find config '{variant}.py' under {cache_root}. "
-                    "Use `mim download rtmdet --config <name> --dest <cache_dir>` "
+                    "Use `mim download mmdet --config <name> --dest <cache_dir>` "
                     "or set models.<key>.config_path."
                 )
             cfg_path = matches[-1]
@@ -467,6 +497,18 @@ def train_rtmdet_backend(
         _configure_evaluator_ann_file(cfg.test_evaluator, ann_file=evaluator_ann_file)
 
     cfg.train_dataloader["batch_size"] = int(resolved_cfg["batch_size"])
+    # Disable persistent workers so dataloader workers exit cleanly at the end
+    # of each epoch (and after training) rather than staying alive until the
+    # Runner is garbage-collected.  persistent_workers=True causes a race
+    # between worker teardown and the QueueFeederThread, which produces
+    # spurious "Bad file descriptor" / semaphore-over-release warnings.
+    # Validation runs with num_workers=0 (same pattern as evaluate_stage).
+    cfg.train_dataloader["persistent_workers"] = False
+    cfg.val_dataloader["num_workers"] = 0
+    cfg.val_dataloader["persistent_workers"] = False
+    if "test_dataloader" in cfg:
+        cfg.test_dataloader["num_workers"] = 0
+        cfg.test_dataloader["persistent_workers"] = False
     _set_num_classes(cfg["model"], len(classes_tuple))
     _patch_pipeline_scales(cfg, int(resolved_cfg["image_size"]))
 
@@ -479,6 +521,13 @@ def train_rtmdet_backend(
 
     runner = Runner.from_cfg(cfg)
     runner.train()
+    # Explicitly release the Runner so fork-based dataloader workers are
+    # cleaned up while the interpreter is still healthy.  Without this,
+    # MMEngine's worker queues are collected during Python shutdown, which
+    # produces spurious "Bad file descriptor" / semaphore-over-release errors.
+    del runner
+    _cleanup_mmengine_singletons()
+    gc.collect()
 
     best_ckpt = _find_best_checkpoint(output_dir)
     if best_ckpt is None:

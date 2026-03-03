@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+# Capture cwd at import time, before any monkeypatch.chdir in individual tests.
+_LAUNCH_DIR = Path.cwd()
+
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
@@ -31,18 +34,37 @@ def run_train_eval_stage(args):
 
 
 def _require_repo_weight(filename: str) -> Path:
-    """Resolve a required local checkpoint from repo root, or skip with context."""
-    repo_root = next(
+    """Resolve a required local checkpoint from repo root, or skip with context.
+
+    Checks both the cwd-based project root (for consumer projects running these
+    tests externally via an editable install) and the source repo root containing
+    this test file (for running directly from the package source).
+    """
+    cwd_root = next(
+        (p for p in [_LAUNCH_DIR, *_LAUNCH_DIR.parents] if (p / "pyproject.toml").exists()),
+        _LAUNCH_DIR,
+    )
+    src_root = next(
         (parent for parent in Path(__file__).resolve().parents if (parent / "pyproject.toml").exists()),
         Path.cwd(),
     )
-    candidate = repo_root / filename
-    if not candidate.exists() or candidate.stat().st_size == 0:
-        pytest.skip(
-            f"Heavy test prerequisite missing: {candidate}. "
-            f"Provide local '{filename}' before running --heavy tests."
-        )
-    return candidate
+    seen: set[Path] = set()
+    roots: list[Path] = []
+    for root in (cwd_root, src_root):
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+
+    for root in roots:
+        candidate = root / filename
+        if candidate.exists() and candidate.stat().st_size > 0:
+            return candidate
+
+    locations = ", ".join(str(r / filename) for r in roots)
+    pytest.skip(
+        f"Heavy test prerequisite missing (checked: {locations}). "
+        f"Provide local '{filename}' before running --heavy tests."
+    )
 
 
 def _assert_common_pipeline_artifacts(workspace: Path, dataset_name: str) -> None:
