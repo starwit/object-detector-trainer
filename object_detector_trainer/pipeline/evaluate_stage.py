@@ -16,7 +16,6 @@ from object_detector_trainer.pipeline.model_state import (
     load_persisted_train_result,
     resolve_baseline_model,
 )
-from object_detector_trainer.plugins.replay import build_or_update_replay_set
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +29,8 @@ class EvaluationContext:
     training_path: Path
     image_size: int
     train_epochs: int
-    baseline_weights_path: str | None
-    fallback_checkpoint: str
-    finetune_weights_path: str | None
+    baseline_weights_path: str
     params: dict
-    split_evaluate_mode: bool
 
 
 def _organize_training_outputs(
@@ -95,6 +91,13 @@ def _log_export_guidance(train_output_dir: Path, experiment_name: str) -> None:
 
 
 def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
+    baseline_weights_path = str(cfg.evaluation.baseline_weights_path or "").strip()
+    if not baseline_weights_path:
+        raise ValueError(
+            "evaluation.baseline_weights_path must be configured for evaluation. "
+            "Baseline comparisons are optional only when no promoted baseline exists yet."
+        )
+
     if train_result is None:
         persisted = load_persisted_train_result()
         model, _display_name = load_model_from_weights(
@@ -106,10 +109,6 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
                 f"Could not load trained model from persisted path: {persisted.best_weights_path}"
             )
 
-        baseline_weights_path = cfg.evaluation.baseline_weights_path
-        if baseline_weights_path is None:
-            baseline_weights_path = persisted.baseline_weights_path
-
         return EvaluationContext(
             model=model,
             experiment_name=persisted.experiment_name,
@@ -119,10 +118,7 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
             image_size=int(persisted.image_size),
             train_epochs=int(persisted.train_epochs),
             baseline_weights_path=baseline_weights_path,
-            fallback_checkpoint=persisted.fallback_checkpoint,
-            finetune_weights_path=persisted.finetune_weights_path,
             params=cfg.model_dump(),
-            split_evaluate_mode=True,
         )
 
     return EvaluationContext(
@@ -133,11 +129,8 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
         training_path=train_result.training_path,
         image_size=int(train_result.image_size),
         train_epochs=int(train_result.train_epochs),
-        baseline_weights_path=train_result.baseline_weights_path,
-        fallback_checkpoint=train_result.fallback_checkpoint,
-        finetune_weights_path=train_result.finetune_weights_path,
-        params=train_result.params,
-        split_evaluate_mode=False,
+        baseline_weights_path=baseline_weights_path,
+        params=cfg.model_dump(),
     )
 
 
@@ -230,25 +223,88 @@ def _run_merged_class_evaluation(
 
     results_csv = output_dir / "results.csv"
     if results_csv.exists():
-        reports.create_formatted_table(results_csv, output_dir=output_dir)
+        reports.create_formatted_table(results_csv, output_dir=output_dir, include_details=True)
+
+
+def _cleanup_summary_dir(summary_dir: Path) -> None:
+    allowed = {"results.csv", "results.txt"}
+    for entry in summary_dir.iterdir():
+        if entry.name in allowed:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
+def _resolve_optional_baseline_model(
+    baseline_weights_path: str,
+) -> tuple[object | None, str | None]:
+    """Resolve baseline model only when a real baseline artifact is present.
+
+    Baseline comparisons are optional only when *no promoted baseline exists yet*.
+
+    Contract:
+    - If the baseline weights file is missing/empty AND there is no nearby
+      metadata.yaml, treat this as "no baseline yet" and evaluate the trained
+      model only.
+    - If metadata.yaml exists next to the baseline path, we consider a promoted
+      baseline to exist, and missing/empty weights is an error (likely a missing
+      `dvc pull`).
+    - If weights exist and are non-empty, we load strictly via resolve_baseline_model()
+      (which requires valid metadata including model_backend).
+    """
+
+    candidate = Path(baseline_weights_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+
+    metadata_candidates = (
+        candidate.parent / "metadata.yaml",
+        candidate.parent.parent / "metadata.yaml",
+    )
+    baseline_promoted = any(path.exists() for path in metadata_candidates)
+
+    if candidate.exists() and not candidate.is_file():
+        raise FileNotFoundError(
+            "evaluation.baseline_weights_path must point to a file, "
+            f"got: {candidate}"
+        )
+
+    baseline_ready = candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0
+    if not baseline_ready:
+        if baseline_promoted:
+            raise FileNotFoundError(
+                "Promoted baseline metadata exists, but the baseline weights file is missing/empty at "
+                f"{candidate}. Fetch the baseline (e.g. `dvc pull {candidate}` or run the bootstrap stage)."
+            )
+        logger.warning(
+            "No promoted baseline present yet at %s; skipping baseline comparison.",
+            candidate,
+        )
+        return None, None
+
+    baseline_model, baseline_display_name = resolve_baseline_model(str(candidate))
+    return baseline_model, baseline_display_name
 
 
 def run_evaluate_stage(args, train_result=None, config=None) -> None:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
-    val_split = float(getattr(args, "val_split", cfg.prepare.val_split))
+    raw_val_split = getattr(args, "val_split", None)
+    val_split = float(cfg.prepare.val_split if raw_val_split is None else raw_val_split)
 
     context = _build_evaluation_context(args, cfg, train_result)
 
-    evaluation_output_dir = (
-        Path("results_comparison") if context.split_evaluate_mode else context.train_output_dir
-    )
+    evaluation_output_dir = context.train_output_dir
     evaluation_output_dir.mkdir(parents=True, exist_ok=True)
+    summary_output_dir = Path("results_comparison")
+    summary_output_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_summary_dir(summary_output_dir)
+
     metrics_path = Path("metrics.json")
 
-    baseline_model, baseline_display_name = resolve_baseline_model(
+    baseline_model, baseline_display_name = _resolve_optional_baseline_model(
         context.baseline_weights_path,
-        context.fallback_checkpoint,
-        finetune_weights_path=context.finetune_weights_path,
     )
 
     baseline_results = None
@@ -262,11 +318,10 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
             val_split=val_split,
             train_epochs=0,
             is_original=True,
-            baseline_model=None,
             metrics_json_path=None,
         )
 
-    retrained_metadata, _ = validate.evaluate_and_log_model_results(
+    retrained_metadata, retrained_results = validate.evaluate_and_log_model_results(
         model=context.model,
         model_name=context.experiment_name,
         test_path=context.test_path,
@@ -274,9 +329,6 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
         output_dir=evaluation_output_dir,
         val_split=val_split,
         train_epochs=context.train_epochs,
-        baseline_model=baseline_model,
-        baseline_display_name=baseline_display_name,
-        baseline_results=baseline_results,
         metrics_json_path=metrics_path,
     )
 
@@ -303,15 +355,26 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
         baseline_display_name=baseline_display_name,
     )
 
-    auto_replay_cfg = cfg.prepare.auto_replay
-    if context.split_evaluate_mode and auto_replay_cfg and auto_replay_cfg.get("enabled", False):
-        build_or_update_replay_set(
-            model=context.model,
-            training_path=context.training_path,
-            train_output_dir=context.train_output_dir,
-            config=auto_replay_cfg,
-        )
+    reports.mean_table(
+        baseline_results,
+        retrained_results,
+        context.experiment_name,
+        baseline_results is not None,
+        baseline_display_name,
+        output_dir=evaluation_output_dir,
+        include_per_class=True,
+        include_details=True,
+    )
+    reports.mean_table(
+        baseline_results,
+        retrained_results,
+        context.experiment_name,
+        baseline_results is not None,
+        baseline_display_name,
+        output_dir=summary_output_dir,
+        include_per_class=False,
+        include_details=False,
+    )
 
-    if not context.split_evaluate_mode:
-        _delete_unused_folders()
+    _delete_unused_folders()
     _log_export_guidance(context.train_output_dir, context.experiment_name)

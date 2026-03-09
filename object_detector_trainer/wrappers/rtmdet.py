@@ -168,10 +168,6 @@ class RTMDetModelAdapter:
         self.rtmdet_config_name = config_name
         self.rtmdet_cache_dir = cache_dir
         self.rtmdet_allow_download = allow_download
-        # Legacy attribute aliases kept for compatibility with older metadata writers.
-        self.mmdet_config_name = self.rtmdet_config_name
-        self.mmdet_cache_dir = self.rtmdet_cache_dir
-        self.mmdet_allow_download = self.rtmdet_allow_download
         self.model = type("_Stub", (), {"yaml": {"model_name": model_name}})()
         self.trainer = None
 

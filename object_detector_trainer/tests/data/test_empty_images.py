@@ -158,10 +158,14 @@ def test_train_model_minimal(tmp_path: Path, source_dataset: SourceDataset):
     shutil.copy(src_img, dataset_dir / "val" / "images" / "image1.jpg")
     shutil.copy(src_label, dataset_dir / "val" / "labels" / "image1.txt")
 
+    checkpoint_path = Path(__file__).resolve().parents[3] / "yolov8n.pt"
+    if not checkpoint_path.exists():
+        pytest.fail(f"Local YOLO checkpoint not found: {checkpoint_path}")
+
     # Try a minimal training run
     model, results, train_output_dir = train_model(
         dataset_path=dataset_dir,
-        checkpoint="yolov8n.pt",  # Use smallest model
+        checkpoint=str(checkpoint_path),
         image_size=320,  # Use small image size for faster test
         batch_size=1,
         experiment_name="test_experiment",

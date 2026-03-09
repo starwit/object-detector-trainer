@@ -14,6 +14,7 @@ from object_detector_trainer.backends.training_config import (
     resolve_training_config,
 )
 from object_detector_trainer.config.loader import load_config
+from object_detector_trainer.pipeline.bootstrap_stage import run_bootstrap_stage
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
@@ -21,7 +22,11 @@ from object_detector_trainer.pipeline.train_stage import run_train_stage
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=["prepare", "train", "evaluate", "all"], required=True)
+    parser.add_argument(
+        "--stage",
+        choices=["bootstrap", "prepare", "train", "evaluate", "all"],
+        required=True,
+    )
     parser.add_argument(
         "--workspace-root",
         default=".",
@@ -38,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-ts", "--test-split", type=float, default=None)
     parser.add_argument("--recreate-dataset", action="store_true")
     parser.add_argument("--augment-multiplier", type=int, default=None)
+    parser.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Bootstrap all configured models instead of only the selected/current train.model.",
+    )
     parser.add_argument(
         "--folder-subset",
         action="append",
@@ -113,9 +123,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolved = resolve_training_config(args, cfg)
         backend_hint = resolved["backend"]
 
-    _set_deterministic_seed(args.seed, backend_hint)
+    if args.stage != "bootstrap":
+        _set_deterministic_seed(args.seed, backend_hint)
 
-    if args.stage == "prepare":
+    if args.stage == "bootstrap":
+        run_bootstrap_stage(args)
+    elif args.stage == "prepare":
         run_prepare_stage(args)
     elif args.stage == "train":
         run_train_stage(args)

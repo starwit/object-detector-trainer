@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import shutil
@@ -11,6 +12,55 @@ import yaml
 from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
+    """Patch RF-DETR to always emit a canonical best checkpoint.
+
+    Upstream RF-DETR only writes checkpoint_best_regular.pth when mAP strictly
+    improves over the initial best (default 0.0). On tiny smoke fixtures, mAP
+    can remain at 0.0 which leaves no best checkpoint and crashes later when
+    RF-DETR tries to copy it into checkpoint_best_total.pth.
+
+    We patch rfdetr.main.BestMetricHolder for the duration of training so the
+    first evaluation is always treated as "best" (init_res < 0.0). This is not a
+    fallback to a different model; it makes the canonical output artifact
+    deterministic and prevents silent substitution.
+    """
+
+    import rfdetr.main as rfdetr_main
+    from rfdetr.util.utils import BestMetricHolder as OriginalBestMetricHolder
+
+    original_symbol = getattr(rfdetr_main, "BestMetricHolder", None)
+    patched_init_res = float(init_res)
+
+    class PatchedBestMetricHolder(OriginalBestMetricHolder):  # type: ignore[misc]
+        def __init__(self, init_res: float = patched_init_res, better: str = "large", use_ema: bool = False) -> None:
+            super().__init__(init_res=init_res, better=better, use_ema=use_ema)
+
+    rfdetr_main.BestMetricHolder = PatchedBestMetricHolder  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        if original_symbol is not None:
+            rfdetr_main.BestMetricHolder = original_symbol  # type: ignore[assignment]
+
+
+def _resolve_required_pretrain_weights(path_like: str | Path | None) -> Path:
+    if not path_like:
+        raise ValueError(
+            "RF-DETR models must define models.<key>.pretrain_weights explicitly. "
+            "Automatic downloads are not allowed."
+        )
+    candidate = Path(path_like).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if not candidate.exists():
+        raise FileNotFoundError(f"models.<key>.pretrain_weights does not exist: {candidate}")
+    if candidate.stat().st_size == 0:
+        raise FileNotFoundError(f"models.<key>.pretrain_weights is empty: {candidate}")
+    return candidate
 
 
 def _rfdetr_resolution_divisor(model_variant: str) -> int:
@@ -119,9 +169,11 @@ def train_rfdetr(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    pretrain_path = _resolve_required_pretrain_weights(pretrain_weights)
+
     model = _get_rfdetr_model(
         model_variant,
-        pretrain_weights=pretrain_weights,
+        pretrain_weights=str(pretrain_path),
         device=device,
         resolution=resolution,
         gradient_checkpointing=gradient_checkpointing,
@@ -142,34 +194,8 @@ def train_rfdetr(
     if extra_train_kwargs:
         train_kwargs.update(extra_train_kwargs)
 
-    try:
+    with _patched_rfdetr_best_metric_holder(init_res=-1.0):
         model.train(**train_kwargs)
-    except FileNotFoundError as e:
-        # Upstream RF-DETR edge case: if mAP never exceeds the initial 0.0 on
-        # very small/broken datasets, it may never write checkpoint_best_*.pth,
-        # but still attempts to copy it into checkpoint_best_total.pth at the end.
-        #
-        # Treat this as non-fatal and fall back to a regular checkpoint so our
-        # pipeline can continue and export weights/best.pt.
-        missing_name = Path(getattr(e, "filename", "") or "").name
-        if missing_name not in {"checkpoint_best_regular.pth", "checkpoint_best_ema.pth"}:
-            raise
-
-        fallback_candidates = [output_dir / "checkpoint.pth"]
-        fallback_candidates.extend(sorted(output_dir.glob("checkpoint*.pth"), reverse=True))
-        fallback_src = next(
-            (p for p in fallback_candidates if p.exists() and p.stat().st_size > 0),
-            None,
-        )
-        if fallback_src is None:
-            raise
-
-        best_total = output_dir / "checkpoint_best_total.pth"
-        shutil.copy2(fallback_src, best_total)
-        print(
-            f"Warning: RF-DETR did not produce {missing_name}. "
-            f"Using {fallback_src.name} as {best_total.name}."
-        )
     return model, output_dir
 
 
@@ -182,30 +208,17 @@ def _save_rfdetr_weights(output_dir: Path) -> None:
     weights_dir = output_dir / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
 
-    # RF-DETR typically saves the best checkpoint as checkpoint_best_total.pth
-    candidates = [
-        output_dir / "checkpoint_best_total.pth",
-        output_dir / "checkpoint_best.pth",
-        output_dir / "best.pth",
-    ]
-    # Also check for any .pth file as a last resort
-    all_pth = sorted(output_dir.glob("*.pth"))
+    source = output_dir / "checkpoint_best_total.pth"
+    if not source.exists():
+        raise FileNotFoundError(
+            f"RF-DETR training did not produce the canonical best checkpoint: {source}"
+        )
+    if source.stat().st_size == 0:
+        raise FileNotFoundError(f"RF-DETR best checkpoint is empty: {source}")
 
-    source = None
-    for c in candidates:
-        if c.exists() and c.stat().st_size > 0:
-            source = c
-            break
-    if source is None and all_pth:
-        # Pick the largest .pth file (likely the full checkpoint)
-        source = max(all_pth, key=lambda p: p.stat().st_size)
-
-    if source is not None:
-        dest = weights_dir / "best.pt"
-        shutil.copy2(source, dest)
-        print(f"RF-DETR best weights saved to {dest}")
-    else:
-        print("Warning: No RF-DETR checkpoint found to copy to weights/best.pt")
+    dest = weights_dir / "best.pt"
+    shutil.copy2(source, dest)
+    print(f"RF-DETR best weights saved to {dest}")
 
 
 def _prepare_rfdetr_yolo_layout(training_path: Path, test_path: Path, dataset_name: str) -> Path:
@@ -293,7 +306,7 @@ def train_rfdetr_backend(
     )
     rfdetr_dataset_dir = rfdetr_export_dir
 
-    runs_root = Path("runs") / "rfdetr"
+    runs_root = Path("runs")
     runs_root.mkdir(parents=True, exist_ok=True)
     display_name = f"{(experiment_name or resolved_cfg['model_key'])}-rfdetr-{rfdetr_variant}"
 

@@ -15,3 +15,7 @@ dist/
 /models/
 /metrics.json
 /results_comparison/
+
+# model artifacts (never track weights in git)
+*.pt
+*.pth

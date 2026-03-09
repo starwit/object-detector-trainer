@@ -26,6 +26,8 @@ from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
 from object_detector_trainer.tests.support.pipeline_test_utils import (
     build_args,
+    create_baseline_artifact,
+    create_local_yolo_checkpoint,
     create_minimal_dataset,
     write_params_yaml,
 )
@@ -140,7 +142,7 @@ def split_eval_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 def _patch_rfdetr_train(monkeypatch: pytest.MonkeyPatch) -> Path:
-    run_dir = Path("runs") / "rfdetr" / "split-reload"
+    run_dir = Path("runs") / "split-reload-rfdetr"
 
     def _fake_train_backend(
         *,
@@ -185,7 +187,7 @@ def _patch_rfdetr_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, 
 
 
 def _patch_rtmdet_train(monkeypatch: pytest.MonkeyPatch) -> Path:
-    run_dir = Path("runs") / "rtmdet" / "split-reload"
+    run_dir = Path("runs") / "split-reload-rtmdet"
 
     def _fake_train_backend(
         *,
@@ -253,6 +255,17 @@ BACKEND_CASES = {
 }
 
 
+def _assert_summary_only(summary_dir: Path) -> None:
+    assert (summary_dir / "results.csv").exists()
+    assert (summary_dir / "results.txt").exists()
+    extras = sorted(
+        entry.name
+        for entry in summary_dir.iterdir()
+        if entry.name not in {"results.csv", "results.txt"}
+    )
+    assert not extras, f"results_comparison must stay summary-only, found: {extras}"
+
+
 @pytest.mark.parametrize("backend_key", sorted(BACKEND_CASES.keys()))
 def test_split_evaluate_reloads_trained_backend_model(
     split_eval_workspace: Path,
@@ -264,11 +277,16 @@ def test_split_evaluate_reloads_trained_backend_model(
     dataset_name = f"split-eval-{backend_key}"
 
     create_minimal_dataset(workspace)
+    baseline_path = create_baseline_artifact(
+        workspace,
+        experiment_name=f"{backend_key}-baseline",
+    )
     write_params_yaml(
         workspace,
         {
             "data": {"dataset_name": dataset_name},
             "train": {"model": case["model_key"]},
+            "evaluation": {"baseline_weights_path": str(baseline_path)},
         },
     )
     args = build_args(dataset_name, {"model": case["model_key"]})
@@ -289,8 +307,13 @@ def test_split_evaluate_reloads_trained_backend_model(
 
     assert reload_calls, f"{backend_key} reload path was not used during split evaluate stage."
     assert str(best_weights_path) not in StubYOLO.recorded_models
-    assert (workspace / "results_comparison" / "results.csv").exists()
+    _assert_summary_only(workspace / "results_comparison")
     assert (workspace / "metrics.json").exists()
+    run_dir = Path(marker_payload["train_output_dir"])
+    assert (run_dir / "metadata.yaml").exists()
+    assert (run_dir / "results.csv").exists()
+    assert (run_dir / "results.txt").exists()
+    assert (run_dir / "plots").is_dir()
 
 
 def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
@@ -300,12 +323,16 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
     workspace = Path.cwd()
     dataset_name = "split-eval-yolo-baseline"
 
-    baseline_dir = workspace / "models" / "current_best"
-    baseline_dir.mkdir(parents=True, exist_ok=True)
-    baseline_a = baseline_dir / "baseline_a.pt"
-    baseline_b = baseline_dir / "baseline_b.pt"
-    baseline_a.write_bytes(b"baseline-a")
-    baseline_b.write_bytes(b"baseline-b")
+    baseline_a = create_baseline_artifact(
+        workspace,
+        weights_path="models/current_best/baseline_a.pt",
+        experiment_name="baseline-a",
+    )
+    baseline_b = create_baseline_artifact(
+        workspace,
+        weights_path="models/current_best/baseline_b.pt",
+        experiment_name="baseline-b",
+    )
 
     create_minimal_dataset(workspace)
     write_params_yaml(
@@ -316,11 +343,12 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
             "evaluation": {"baseline_weights_path": str(baseline_a)},
         },
     )
+    create_local_yolo_checkpoint(workspace)
     args = build_args(dataset_name, {"model": "yolov8n"})
 
     run_prepare_stage(args)
 
-    run_dir = Path("runs") / "yolo" / "split-baseline-check"
+    run_dir = Path("runs") / "split-baseline-check"
 
     def _fake_train_backend(
         *,
@@ -355,10 +383,7 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
 
     captured: dict[str, str] = {}
 
-    def _fake_load_model_from_weights(
-        path_candidate: str | Path | None,
-        metadata_override: dict[str, object] | None = None,
-    ):
+    def _fake_load_model_from_weights(path_candidate, metadata_override=None):
         model = _StubEvalModel(
             model_name="yolo-trained-reloaded",
             model_backend="yolo",
@@ -366,11 +391,7 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
         )
         return model, "yolo-trained-reloaded"
 
-    def _fake_resolve_baseline_model(
-        baseline_weights_path: str | None,
-        fallback_checkpoint: str,
-        finetune_weights_path: str | None = None,
-    ):
+    def _fake_resolve_baseline_model(baseline_weights_path: str | None):
         captured["baseline_weights_path"] = str(baseline_weights_path)
         model = _StubEvalModel(
             model_name="baseline",
@@ -391,5 +412,7 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
     run_evaluate_stage(args, train_result=None)
 
     assert Path(captured["baseline_weights_path"]).resolve() == baseline_b.resolve()
-    assert not (run_dir / "metadata.yaml").exists()
-    assert (workspace / "results_comparison" / "metadata.yaml").exists()
+    assert (run_dir / "metadata.yaml").exists()
+    assert (run_dir / "results.csv").exists()
+    assert (run_dir / "results.txt").exists()
+    _assert_summary_only(workspace / "results_comparison")
