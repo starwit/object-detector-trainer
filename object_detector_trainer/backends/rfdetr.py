@@ -94,15 +94,6 @@ def _normalize_rfdetr_resolution(model_variant: str, resolution: int | None, fal
         resolution = adjusted
     return int(resolution)
 
-
-def _infer_rfdetr_variant(model_key: str) -> str:
-    key = str(model_key or "").strip().lower().replace("_", "-")
-    for prefix in ("rfdetr-", "rf-detr-"):
-        if key.startswith(prefix) and len(key) > len(prefix):
-            return key[len(prefix) :]
-    return "base"
-
-
 def _get_rfdetr_model(
     model_variant: str,
     pretrain_weights: str | None = None,
@@ -380,6 +371,5 @@ __all__ = [
     "train_backend",
     "train_rfdetr_backend",
     "_get_rfdetr_model",
-    "_infer_rfdetr_variant",
     "_normalize_rfdetr_resolution",
 ]

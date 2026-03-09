@@ -371,15 +371,15 @@ def load_rtmdet_baseline(
         if config_from_meta and config_from_meta.exists():
             config_path = config_from_meta
         else:
-            variant = metadata.get("rtmdet_config_name") or metadata.get("model_variant")
-            if not variant:
+            config_name = metadata.get("rtmdet_config_name")
+            if not config_name:
                 raise RuntimeError(
-                    "MMDetection baseline metadata must include model_config_path or model_variant."
+                    "MMDetection baseline metadata must include model_config_path or rtmdet_config_name."
                 )
             config_path, _unused_ckpt, _ = _resolve_rtmdet_assets(
                 config_path=None,
                 checkpoint_path=None,
-                config_name=str(variant),
+                config_name=str(config_name),
                 cache_dir=metadata.get("rtmdet_cache_dir"),
                 allow_download=bool(metadata.get("rtmdet_allow_download", False)),
             )

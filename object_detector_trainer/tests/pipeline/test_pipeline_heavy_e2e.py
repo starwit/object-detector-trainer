@@ -10,8 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from object_detector_trainer.backends.training_config import normalize_backend_name
-from object_detector_trainer.pipeline import bootstrap_stage
+from object_detector_trainer.backends.registry import (
+    bootstrap_model_assets,
+    normalize_backend_name,
+    supported_backend_names,
+)
 from object_detector_trainer.pipeline.bootstrap_stage import run_bootstrap_stage
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
@@ -53,6 +56,11 @@ def _discover_backend_cases() -> list[tuple[str, str]]:
         backend = normalize_backend_name(model_cfg["backend"])
         by_backend.setdefault(backend, str(model_key))
 
+    missing_backends = sorted(set(supported_backend_names()) - set(by_backend))
+    if missing_backends:
+        missing = ", ".join(missing_backends)
+        raise RuntimeError(f"BASE_PARAMS is missing representative models for backends: {missing}")
+
     return sorted((backend, model_key) for backend, model_key in by_backend.items())
 
 
@@ -67,8 +75,10 @@ def _ensure_yolo_checkpoint(workspace: Path) -> Path:
     if checkpoint.exists() and checkpoint.stat().st_size > 0:
         return checkpoint
 
-    # Use the same download logic as the bootstrap stage so paths stay canonical.
-    bootstrap_stage._download_yolo_asset(checkpoint)  # noqa: SLF001
+    bootstrap_model_assets(
+        "yolov8n",
+        {"backend": "yolo", "checkpoint": str(checkpoint)},
+    )
     if not checkpoint.exists() or checkpoint.stat().st_size == 0:
         pytest.fail(f"Failed to download required YOLO checkpoint: {checkpoint}")
     return checkpoint

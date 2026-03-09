@@ -263,7 +263,10 @@ def _resolve_optional_baseline_model(
         candidate.parent / "metadata.yaml",
         candidate.parent.parent / "metadata.yaml",
     )
-    baseline_promoted = any(path.exists() for path in metadata_candidates)
+    metadata_dvc_candidates = [path.with_name(f"{path.name}.dvc") for path in metadata_candidates]
+    baseline_promoted = any(path.exists() for path in metadata_candidates) or any(
+        path.exists() for path in metadata_dvc_candidates
+    )
 
     if candidate.exists() and not candidate.is_file():
         raise FileNotFoundError(

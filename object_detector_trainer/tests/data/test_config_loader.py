@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from object_detector_trainer.backends.training_config import resolve_training_config
@@ -52,3 +53,49 @@ def test_resolve_training_config_uses_cli_seed(tmp_path: Path) -> None:
 
     resolved = resolve_training_config(SimpleNamespace(seed=1337, model=None), cfg)
     assert resolved["seed"] == 1337
+
+
+def test_resolve_training_config_requires_explicit_rfdetr_variant(tmp_path: Path) -> None:
+    params_path = tmp_path / "params.yaml"
+    payload = {
+        "data": {
+            "dataset_name": "sample-ds",
+            "custom_classes": ["waste"],
+            "use_coco_classes": False,
+        },
+        "train": {"model": "rfdetr-nano"},
+        "models": {
+            "rfdetr-nano": {
+                "backend": "rfdetr",
+                "pretrain_weights": "models/pretrained/rfdetr/rf-detr-nano.pth",
+            }
+        },
+    }
+    params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cfg = load_config(params_path)
+
+    with pytest.raises(ValueError, match="must define variant explicitly"):
+        resolve_training_config(SimpleNamespace(seed=42, model=None), cfg)
+
+
+def test_resolve_training_config_does_not_accept_rtmdet_variant_alias(tmp_path: Path) -> None:
+    params_path = tmp_path / "params.yaml"
+    payload = {
+        "data": {
+            "dataset_name": "sample-ds",
+            "custom_classes": ["waste"],
+            "use_coco_classes": False,
+        },
+        "train": {"model": "rtmdet-tiny"},
+        "models": {
+            "rtmdet-tiny": {
+                "backend": "rtmdet",
+                "variant": "rtmdet_tiny_8xb32-300e_coco",
+            }
+        },
+    }
+    params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cfg = load_config(params_path)
+
+    with pytest.raises(ValueError, match="must define either config_name or config_path"):
+        resolve_training_config(SimpleNamespace(seed=42, model=None), cfg)

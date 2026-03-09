@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from object_detector_trainer.backends import rtmdet, rfdetr, yolo
+from object_detector_trainer.backends.registry import build_reload_metadata, train_backend
 from object_detector_trainer.backends.training_config import resolve_training_config
 from object_detector_trainer.config.loader import load_config
 from object_detector_trainer.pipeline.model_state import persist_train_result
@@ -35,16 +35,8 @@ def run_train_stage(args, config=None) -> TrainResult:
     test_path = dataset_path / "test"
 
     backend = resolved_cfg["backend"]
-    trainer_by_backend = {
-        "rfdetr": rfdetr.train_backend,
-        "rtmdet": rtmdet.train_backend,
-        "yolo": yolo.train_backend,
-    }
-    train_backend = trainer_by_backend.get(backend)
-    if train_backend is None:
-        raise ValueError(f"Unsupported backend: {backend!r}")
-
     model, train_output_dir, experiment_display_name, image_size, train_epochs = train_backend(
+        backend,
         training_path=training_path,
         test_path=test_path,
         dataset_name=str(dataset_name),
@@ -57,29 +49,7 @@ def run_train_stage(args, config=None) -> TrainResult:
         "model_backend": str(backend),
         "image_size": int(image_size),
     }
-    variant_by_backend = {
-        "rfdetr": resolved_cfg.get("rfdetr_variant"),
-        "rtmdet": resolved_cfg.get("rtmdet_config_name"),
-    }
-    model_variant = getattr(model, "model_variant", None) or variant_by_backend.get(backend)
-    if model_variant:
-        reload_metadata["model_variant"] = str(model_variant)
-
-    if backend == "rtmdet":
-        for key, attr_name, cfg_key in (
-            ("model_config_path", "model_config_path", "rtmdet_config_path"),
-            ("rtmdet_config_name", "rtmdet_config_name", "rtmdet_config_name"),
-            ("rtmdet_cache_dir", "rtmdet_cache_dir", "rtmdet_cache_dir"),
-        ):
-            value = getattr(model, attr_name, None) or resolved_cfg.get(cfg_key)
-            if value:
-                reload_metadata[key] = str(value)
-
-        rtmdet_allow_download = getattr(model, "rtmdet_allow_download", None)
-        if rtmdet_allow_download is None:
-            rtmdet_allow_download = resolved_cfg.get("rtmdet_allow_download")
-        if rtmdet_allow_download is not None:
-            reload_metadata["rtmdet_allow_download"] = bool(rtmdet_allow_download)
+    reload_metadata.update(build_reload_metadata(backend, model, resolved_cfg))
 
     class_names = getattr(model, "class_names", None)
     if isinstance(class_names, dict) and class_names:
