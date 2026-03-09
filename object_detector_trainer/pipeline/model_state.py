@@ -16,11 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import yaml
 
-from object_detector_trainer.backends.training_config import normalize_backend_name
-from object_detector_trainer.wrappers.rfdetr import RFDETRModelAdapter
+from object_detector_trainer.backends.registry import (
+    load_backend_model_from_weights,
+    normalize_backend_name,
+)
 
 
 @dataclass
@@ -214,46 +215,13 @@ def load_model_from_weights(
             f"Model metadata for {candidate_path} must define 'model_backend'."
         )
     backend = normalize_backend_name(backend_raw)
-    if backend == "rfdetr":
-        from object_detector_trainer.backends import rfdetr as core_rfdetr
-
-        model_variant = str(meta.get("model_variant", "base")).strip().lower() or "base"
-        resolution = int(meta.get("image_size", 640) or 640)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        rfdetr_model = core_rfdetr._get_rfdetr_model(
-            model_variant=model_variant,
-            pretrain_weights=str(candidate_path),
-            device=device,
-            resolution=int(resolution),
-        )
-        adapter = RFDETRModelAdapter(
-            rfdetr_model,
-            model_name=str(display_name),
-            resolution=int(resolution),
-            model_variant=model_variant,
-        )
-        return adapter, str(display_name)
-
-    if backend == "rtmdet":
-        from object_detector_trainer.backends import rtmdet as core_rtmdet
-
-        adapter = core_rtmdet.load_rtmdet_baseline(
-            weights_path=candidate_path,
-            metadata=meta,
-            display_name=str(display_name),
-        )
-        return adapter, str(display_name)
-
-    model_instance = _load_yolo_model(str(candidate_path))
-    setattr(model_instance, "model_backend", backend)
-    setattr(model_instance, "model_name", str(display_name))
-    if meta.get("model_variant"):
-        setattr(model_instance, "model_variant", str(meta["model_variant"]))
-    if meta.get("image_size") is not None:
-        setattr(model_instance, "resolution", int(meta["image_size"]))
-    class_names = meta.get("class_names")
-    if isinstance(class_names, dict) and class_names:
-        setattr(model_instance, "class_names", {int(k): str(v) for k, v in class_names.items()})
+    model_instance = load_backend_model_from_weights(
+        backend,
+        candidate_path,
+        meta,
+        str(display_name),
+        _load_yolo_model,
+    )
     return model_instance, str(display_name)
 
 

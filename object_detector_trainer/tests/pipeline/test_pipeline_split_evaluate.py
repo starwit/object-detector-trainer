@@ -8,9 +8,8 @@ These tests intentionally run:
 That forces the evaluate stage to reload the trained model from persisted run
 artifacts (the same code path used by split DVC stages).
 
-To add a new backend later:
-- add one entry to ``BACKEND_CASES``
-- add its ``patch_train`` and ``patch_reload`` helpers
+If a new non-YOLO backend is introduced, this test will fail until it gets an
+explicit train/reload patch pair here.
 """
 
 from __future__ import annotations
@@ -21,10 +20,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
 from object_detector_trainer.tests.support.pipeline_test_utils import (
+    BASE_PARAMS,
     build_args,
     create_baseline_artifact,
     create_local_yolo_checkpoint,
@@ -241,18 +242,57 @@ def _patch_rtmdet_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, 
     monkeypatch.setattr("object_detector_trainer.backends.rtmdet.load_rtmdet_baseline", _fake_load_rtmdet_baseline)
 
 
-BACKEND_CASES = {
+_PATCHERS_BY_BACKEND = {
     "rfdetr": {
-        "model_key": "rfdetr-nano",
         "patch_train": _patch_rfdetr_train,
         "patch_reload": _patch_rfdetr_reload,
     },
     "rtmdet": {
-        "model_key": "rtmdet-tiny",
         "patch_train": _patch_rtmdet_train,
         "patch_reload": _patch_rtmdet_reload,
     },
 }
+
+
+def _discover_non_yolo_backend_cases() -> dict[str, dict[str, object]]:
+    expected_backends = {backend for backend in supported_backend_names() if backend != "yolo"}
+    if expected_backends != set(_PATCHERS_BY_BACKEND):
+        missing = sorted(expected_backends - set(_PATCHERS_BY_BACKEND))
+        extra = sorted(set(_PATCHERS_BY_BACKEND) - expected_backends)
+        raise RuntimeError(
+            "Split evaluate patch coverage drifted. "
+            f"Missing backends: {missing or 'none'}. Extra backends: {extra or 'none'}."
+        )
+
+    models_cfg = BASE_PARAMS.get("models", {})
+    if not isinstance(models_cfg, dict):
+        raise RuntimeError("BASE_PARAMS.models must be a mapping.")
+
+    model_by_backend: dict[str, str] = {}
+    for model_key, model_cfg in sorted(models_cfg.items()):
+        if not isinstance(model_cfg, dict):
+            continue
+        backend = normalize_backend_name(model_cfg["backend"])
+        if backend in expected_backends:
+            model_by_backend.setdefault(backend, str(model_key))
+
+    missing_models = sorted(expected_backends - set(model_by_backend))
+    if missing_models:
+        raise RuntimeError(
+            f"BASE_PARAMS is missing representative models for non-YOLO backends: {', '.join(missing_models)}"
+        )
+
+    return {
+        backend: {
+            "model_key": model_by_backend[backend],
+            "patch_train": patchers["patch_train"],
+            "patch_reload": patchers["patch_reload"],
+        }
+        for backend, patchers in sorted(_PATCHERS_BY_BACKEND.items())
+    }
+
+
+BACKEND_CASES = _discover_non_yolo_backend_cases()
 
 
 def _assert_summary_only(summary_dir: Path) -> None:

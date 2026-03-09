@@ -172,6 +172,29 @@ def test_pipeline_fails_when_promoted_baseline_weights_missing(stubbed_pipeline:
         run_train_eval_stage(args)
 
 
+def test_pipeline_fails_when_promoted_baseline_metadata_is_only_dvc_pointer(stubbed_pipeline: StubYOLO):
+    """A DVC-tracked promoted baseline must fail loudly until artifacts are pulled."""
+
+    workspace = Path.cwd()
+    dataset_name = "e2e_dataset"
+    create_minimal_dataset(workspace)
+    write_params_yaml(workspace, {"data": {"dataset_name": dataset_name}})
+    create_local_yolo_checkpoint(workspace)
+
+    baseline_dir = workspace / "models" / "current_best"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    (baseline_dir / "metadata.yaml.dvc").write_text("outs:\n- md5: deadbeef\n", encoding="utf-8")
+    weights_path = baseline_dir / "best.pt"
+    if weights_path.exists():
+        weights_path.unlink()
+
+    args = build_args(dataset_name)
+
+    run_prepare_stage(args)
+    with pytest.raises(FileNotFoundError, match="Promoted baseline metadata exists"):
+        run_train_eval_stage(args)
+
+
 def test_prepare_stage_fails_when_no_training_data(stubbed_pipeline: StubYOLO):
     """Prepare should fail early with a clear message when no raw training data exists."""
 

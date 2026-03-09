@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
 from object_detector_trainer.cli import run_all_stages
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
@@ -42,8 +43,12 @@ def _discover_backend_cases() -> list[tuple[str, str]]:
     for model_key, model_cfg in sorted(models_cfg.items()):
         if not isinstance(model_cfg, dict):
             continue
-        backend = str(model_cfg["backend"]).strip().lower()
+        backend = normalize_backend_name(model_cfg["backend"])
         cases.setdefault(backend, str(model_key))
+    missing_backends = sorted(set(supported_backend_names()) - set(cases))
+    if missing_backends:
+        missing = ", ".join(missing_backends)
+        raise RuntimeError(f"BASE_PARAMS is missing representative models for backends: {missing}")
     return [(model_key, backend) for backend, model_key in sorted(cases.items())]
 
 
@@ -176,44 +181,24 @@ def contract_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) -> None:
     baseline_path = create_baseline_artifact(workspace)
+    models_cfg = BASE_PARAMS.get("models", {})
+    if not isinstance(models_cfg, dict):
+        raise AssertionError("BASE_PARAMS.models must be a mapping.")
+    source_model_cfg = models_cfg.get(model)
+    if not isinstance(source_model_cfg, dict):
+        raise AssertionError(f"Unsupported model for test setup: {model}")
+    model_cfg = dict(source_model_cfg)
 
     common = {
         "data": {"dataset_name": dataset_name},
         "train": {"model": model, "epochs": 1, "batch_size": 1, "image_size": 320},
         "evaluation": {"baseline_weights_path": str(baseline_path)},
+        "models": {model: model_cfg},
     }
 
-    if model == "yolov8n":
-        common["models"] = {"yolov8n": {"backend": "yolo", "checkpoint": "yolov8n.pt"}}
-    elif model == "rfdetr-nano":
-        common["models"] = {
-            "rfdetr-nano": {
-                "backend": "rfdetr",
-                "variant": "nano",
-                "pretrain_weights": "models/pretrained/rfdetr/rf-detr-nano.pth",
-                "resolution": 320,
-                "epochs": 1,
-                "batch_size": 1,
-                "grad_accum_steps": 1,
-            }
-        }
-    elif model == "rtmdet-tiny":
-        common["models"] = {
-            "rtmdet-tiny": {
-                "backend": "rtmdet",
-                "config_name": "rtmdet_tiny_8xb32-300e_coco",
-                "allow_download": False,
-                "epochs": 1,
-                "batch_size": 1,
-                "image_size": 320,
-            }
-        }
-    else:
-        raise AssertionError(f"Unsupported model for test setup: {model}")
-
     write_params_yaml(workspace, common)
-    if model == "yolov8n":
-        create_local_yolo_checkpoint(workspace)
+    if normalize_backend_name(model_cfg["backend"]) == "yolo":
+        create_local_yolo_checkpoint(workspace, checkpoint_path=str(model_cfg["checkpoint"]))
 
 
 def _patch_lightweight_trainers(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
