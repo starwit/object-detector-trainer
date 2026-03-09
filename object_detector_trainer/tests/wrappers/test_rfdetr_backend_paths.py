@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from object_detector_trainer.backends.rfdetr import _prepare_rfdetr_yolo_layout
+from object_detector_trainer.backends.rfdetr import _prepare_rfdetr_yolo_layout, _save_rfdetr_weights
 
 
 def test_prepare_rfdetr_yolo_layout_sanitizes_dataset_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,3 +31,25 @@ def test_prepare_rfdetr_yolo_layout_sanitizes_dataset_name(tmp_path: Path, monke
     assert sentinel.exists(), "dataset_name must not allow deleting .tmp/"
     assert export_dir.exists()
     assert export_dir.resolve().is_relative_to((tmp_root / "rfdetr_datasets").resolve())
+
+
+def test_save_rfdetr_weights_requires_canonical_best_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "rfdetr-contract"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoint0000.pth").write_bytes(b"non-canonical")
+
+    with pytest.raises(FileNotFoundError, match="canonical best checkpoint"):
+        _save_rfdetr_weights(run_dir)
+
+
+def test_save_rfdetr_weights_copies_canonical_best_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "rfdetr-contract"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint = run_dir / "checkpoint_best_total.pth"
+    best_checkpoint.write_bytes(b"canonical-best")
+
+    _save_rfdetr_weights(run_dir)
+
+    exported = run_dir / "weights" / "best.pt"
+    assert exported.exists()
+    assert exported.read_bytes() == b"canonical-best"

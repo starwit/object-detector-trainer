@@ -21,11 +21,7 @@ class TrainResult:
     train_epochs: int
     training_path: Path
     test_path: Path
-    baseline_weights_path: str | None
-    fallback_checkpoint: str
-    finetune_weights_path: str | None
     reload_metadata: dict[str, Any]
-    params: dict[str, Any]
 
 
 def run_train_stage(args, config=None) -> TrainResult:
@@ -55,24 +51,17 @@ def run_train_stage(args, config=None) -> TrainResult:
         resolved_cfg=resolved_cfg,
         experiment_name=experiment_name,
     )
-    finetune_weights_path = (
-        str(resolved_cfg.get("pretrained_model_path"))
-        if backend == "yolo"
-        and bool(resolved_cfg.get("finetune_mode", False))
-        and resolved_cfg.get("pretrained_model_path")
-        else None
-    )
 
     reload_metadata: dict[str, object] = {
         "experiment_name": str(experiment_display_name),
         "model_backend": str(backend),
         "image_size": int(image_size),
     }
-    fallback_variant_by_backend = {
+    variant_by_backend = {
         "rfdetr": resolved_cfg.get("rfdetr_variant"),
         "rtmdet": resolved_cfg.get("rtmdet_config_name"),
     }
-    model_variant = getattr(model, "model_variant", None) or fallback_variant_by_backend.get(backend)
+    model_variant = getattr(model, "model_variant", None) or variant_by_backend.get(backend)
     if model_variant:
         reload_metadata["model_variant"] = str(model_variant)
 
@@ -104,11 +93,7 @@ def run_train_stage(args, config=None) -> TrainResult:
         train_epochs=int(train_epochs),
         training_path=training_path,
         test_path=test_path,
-        baseline_weights_path=resolved_cfg.get("baseline_weights_path"),
-        fallback_checkpoint=str(resolved_cfg["fallback_checkpoint"]),
-        finetune_weights_path=finetune_weights_path,
         reload_metadata=reload_metadata,
-        params=resolved_cfg.get("params", {}),
     )
 
     auto_replay_cfg = cfg.prepare.auto_replay
@@ -127,9 +112,6 @@ def run_train_stage(args, config=None) -> TrainResult:
         train_epochs=result.train_epochs,
         training_path=result.training_path,
         test_path=result.test_path,
-        baseline_weights_path=result.baseline_weights_path,
-        fallback_checkpoint=result.fallback_checkpoint,
-        finetune_weights_path=result.finetune_weights_path,
         reload_metadata=result.reload_metadata,
     )
     return result

@@ -3,7 +3,7 @@
 Why this file exists:
 1) run-dir uniqueness logic is reused by multiple backends,
 2) dataset-name sanitization rules must stay consistent across exporters,
-3) copy/link behavior should be implemented once (same fallback semantics).
+3) copy/link behavior should be implemented once.
 """
 
 from __future__ import annotations

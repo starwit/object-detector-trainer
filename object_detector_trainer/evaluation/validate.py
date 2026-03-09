@@ -10,7 +10,6 @@ from object_detector_trainer.evaluation import scene_metrics
 from object_detector_trainer.evaluation.reports import (
     append_results_to_csv,
     create_formatted_table,
-    mean_table,
     write_merged_class_results,
 )
 
@@ -33,9 +32,6 @@ def evaluate_and_log_model_results(
     val_split,
     train_epochs=0,
     is_original=False,
-    baseline_model=None,
-    baseline_display_name=None,
-    baseline_results=None,
     metrics_json_path: Path | None = None,
 ):
     """
@@ -57,6 +53,10 @@ def evaluate_and_log_model_results(
         metrics_json_path=metrics_json_path,
     )
 
+    model_backend = getattr(model, "model_backend", None)
+    if not model_backend:
+        raise ValueError(f"Model {model_name!r} does not declare model_backend.")
+
     metadata = {
         "experiment_name": model_name,
         "split_parameters": {
@@ -64,7 +64,7 @@ def evaluate_and_log_model_results(
         },
         "num_epochs": train_epochs,
         "model_size": model.model_name if hasattr(model, "model_name") else "Unknown",
-        "model_backend": str(getattr(model, "model_backend", "yolo")),
+        "model_backend": str(model_backend),
         "image_size": image_size,
     }
     model_variant = getattr(model, "model_variant", None)
@@ -87,42 +87,6 @@ def evaluate_and_log_model_results(
         metadata["class_names"] = {int(k): str(v) for k, v in class_names_meta.items()}
 
     append_results_to_csv(output_dir, results, metadata, is_original)
-
-    if is_original:
-        return metadata, results
-
-    if baseline_model is None:
-        raise ValueError(
-            "baseline_model must be provided when evaluating a trained model. "
-            "Resolve the baseline in the pipeline and pass it in explicitly."
-        )
-    base_model = baseline_model
-    base_model_name = (
-        str(baseline_display_name)
-        if baseline_display_name
-        else getattr(baseline_model, "model_name", "Baseline Model")
-    )
-    logger.info("Using provided baseline model for comparison: %s", base_model_name)
-
-    base_results = (
-        baseline_results
-        if baseline_results is not None
-        else validate_model(
-            base_model,
-            data=str(dataset_yaml_path),
-            class_ids=class_ids,
-            imgsz=image_size,
-            workers=0,
-            write_json=False,
-        )
-    )
-    mean_table(
-        base_results,
-        results,
-        model_name,
-        True,
-        base_model_name,
-    )
 
     return metadata, results
 
@@ -243,7 +207,6 @@ __all__ = [
     "create_formatted_table",
     "evaluate_and_log_model_results",
     "get_dataset_classes",
-    "mean_table",
     "validate_model",
     "write_merged_class_results",
 ]

@@ -3,8 +3,8 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import shutil
-import subprocess
 from pathlib import Path
 
 import cv2
@@ -37,8 +37,8 @@ def _cleanup_mmengine_singletons() -> None:
         for handler in list(inst.handlers):
             try:
                 handler.close()
-            except Exception:
-                pass
+            except (OSError, RuntimeError, ValueError):
+                logger.debug("Ignoring expected RTMDet logger handler close failure.", exc_info=True)
             inst.removeHandler(handler)
     MMLogger._instance_dict.clear()
     MessageHub._instance_dict.clear()
@@ -182,35 +182,6 @@ def _resolve_path(path_like: str | Path | None) -> Path | None:
     return path
 
 
-def _download_rtmdet_assets(config_name: str, cache_dir: Path) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "mim",
-        "download",
-        "mmdet",
-        "--config",
-        str(config_name),
-        "--dest",
-        str(cache_dir),
-    ]
-    try:
-        subprocess.run(cmd, check=True, timeout=60 * 30)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            "OpenMIM is required for RTMDet auto-download. "
-            "Install it (e.g. `pip install openmim`) or provide models.<key>.config_path/checkpoint."
-        ) from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"Timed out downloading MMDetection assets for config '{config_name}'. "
-            f"Command: {' '.join(cmd)}"
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Failed to download MMDetection assets for config '{config_name}'. Command: {' '.join(cmd)}"
-        ) from e
-
-
 def _resolve_rtmdet_assets(
     *,
     config_path: str | Path | None,
@@ -232,8 +203,6 @@ def _resolve_rtmdet_assets(
     if cfg_path is None:
         if not variant:
             raise ValueError("MMDetection backend needs either config_path or config_name.")
-        if allow_download:
-            _download_rtmdet_assets(variant, cache_root)
 
         candidate = cache_root / f"{variant}.py"
         if candidate.exists():
@@ -241,10 +210,15 @@ def _resolve_rtmdet_assets(
         else:
             matches = sorted(cache_root.glob(f"**/{variant}.py"))
             if not matches:
+                download_note = (
+                    " Automatic downloads are disabled; pre-download the assets locally."
+                    if allow_download
+                    else ""
+                )
                 raise FileNotFoundError(
                     f"Could not find config '{variant}.py' under {cache_root}. "
                     "Use `mim download mmdet --config <name> --dest <cache_dir>` "
-                    "or set models.<key>.config_path."
+                    f"or set models.<key>.config_path.{download_note}"
                 )
             cfg_path = matches[-1]
 
@@ -262,7 +236,7 @@ def _resolve_rtmdet_assets(
 def _patch_pipeline_scales(node, image_size: int) -> None:
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in {"scale", "img_scale"} and isinstance(value, (list, tuple)) and len(value) == 2:
+            if key in {"scale", "img_scale", "crop_size", "size"} and isinstance(value, (list, tuple)) and len(value) == 2:
                 node[key] = (int(image_size), int(image_size))
             else:
                 _patch_pipeline_scales(value, image_size)
@@ -270,6 +244,43 @@ def _patch_pipeline_scales(node, image_size: int) -> None:
     if isinstance(node, list):
         for item in node:
             _patch_pipeline_scales(item, image_size)
+
+
+def _fix_mosaic_pipeline_resize(node, image_size: int) -> None:
+    """In pipeline lists that contain CachedMosaic, set RandomResize.scale to 2×image_size.
+
+    CachedMosaic stitches four img_scale-sized tiles into a composite roughly
+    2×img_scale.  The subsequent RandomResize must operate on that larger canvas
+    (scale = 2×image_size) so the multi-scale augmentation range is correct
+    relative to the final RandomCrop (which extracts an image_size patch).
+    """
+    if isinstance(node, list):
+        has_mosaic = any(
+            isinstance(item, dict) and "Mosaic" in str(item.get("type", ""))
+            for item in node
+        )
+        if has_mosaic:
+            for item in node:
+                if isinstance(item, dict) and item.get("type") == "RandomResize":
+                    if "scale" in item and isinstance(item["scale"], (list, tuple)) and len(item["scale"]) == 2:
+                        item["scale"] = (int(image_size * 2), int(image_size * 2))
+        for item in node:
+            _fix_mosaic_pipeline_resize(item, image_size)
+    elif isinstance(node, dict):
+        for value in node.values():
+            _fix_mosaic_pipeline_resize(value, image_size)
+
+
+def _convert_syncbn_to_bn(node) -> None:
+    """Replace SyncBN with BN for single-GPU training."""
+    if isinstance(node, dict):
+        if node.get("type") == "SyncBN":
+            node["type"] = "BN"
+        for value in node.values():
+            _convert_syncbn_to_bn(value)
+    elif isinstance(node, list):
+        for item in node:
+            _convert_syncbn_to_bn(item)
 
 
 def _configure_dataset(dataset_cfg: dict, *, data_root: Path, ann_file: str, img_prefix: str, classes: tuple[str, ...]) -> None:
@@ -360,11 +371,7 @@ def load_rtmdet_baseline(
         if config_from_meta and config_from_meta.exists():
             config_path = config_from_meta
         else:
-            variant = (
-                metadata.get("rtmdet_config_name")
-                or metadata.get("mmdet_config_name")
-                or metadata.get("model_variant")
-            )
+            variant = metadata.get("rtmdet_config_name") or metadata.get("model_variant")
             if not variant:
                 raise RuntimeError(
                     "MMDetection baseline metadata must include model_config_path or model_variant."
@@ -373,13 +380,8 @@ def load_rtmdet_baseline(
                 config_path=None,
                 checkpoint_path=None,
                 config_name=str(variant),
-                cache_dir=metadata.get("rtmdet_cache_dir") or metadata.get("mmdet_cache_dir"),
-                allow_download=bool(
-                    metadata.get(
-                        "rtmdet_allow_download",
-                        metadata.get("mmdet_allow_download", True),
-                    )
-                ),
+                cache_dir=metadata.get("rtmdet_cache_dir"),
+                allow_download=bool(metadata.get("rtmdet_allow_download", False)),
             )
 
     try:
@@ -448,11 +450,17 @@ def train_rtmdet_backend(
         checkpoint_path=resolved_cfg.get("rtmdet_checkpoint"),
         config_name=resolved_cfg.get("rtmdet_config_name"),
         cache_dir=resolved_cfg.get("rtmdet_cache_dir"),
-        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", True)),
+        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", False)),
     )
+    if ckpt_path is None:
+        raise FileNotFoundError(
+            "RTMDet requires a local pretrained checkpoint for training. "
+            f"No checkpoint was found for config '{variant}' under "
+            f"{resolved_cfg.get('rtmdet_cache_dir') or 'models/pretrained/rtmdet'}."
+        )
 
     run_name = experiment_name or f"{resolved_cfg['model_key']}-rtmdet"
-    runs_root = Path("runs") / "rtmdet"
+    runs_root = Path("runs")
     runs_root.mkdir(parents=True, exist_ok=True)
     output_dir = resolve_unique_run_dir(runs_root, run_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -462,11 +470,52 @@ def train_rtmdet_backend(
     cfg.load_from = str(ckpt_path) if ckpt_path is not None else None
     cfg.resume = False
     cfg.train_cfg["max_epochs"] = int(resolved_cfg["epochs"])
+    # The config's cosine schedule is hardcoded for 300-epoch COCO training
+    # (cosine from epoch 150→300, eta_min=0.0002 at base_lr=0.004 = 5% of peak).
+    # Rescale to cover the second half of our actual epoch count and keep the
+    # same 5% eta_min ratio relative to our base_lr.
+    epochs = int(resolved_cfg["epochs"])
+    cosine_start = epochs // 2
+    base_lr = float(resolved_cfg["rtmdet_lr"])
+    for sched in cfg.get("param_scheduler", []):
+        if isinstance(sched, dict) and sched.get("type") == "CosineAnnealingLR":
+            sched["begin"] = cosine_start
+            sched["end"] = epochs
+            sched["T_max"] = epochs - cosine_start
+            sched["eta_min"] = round(base_lr * 0.05, 8)
+    # The default LinearLR warmup runs for 1000 iterations — calibrated for
+    # COCO (118K images / BS 32 ≈ 3700 iters/epoch → ~0.27 epochs).  For
+    # smaller datasets that would extend warmup over many epochs, cap it
+    # at one epoch's worth of iterations (minimum 100).
+    batch_size = int(resolved_cfg["batch_size"])
+    train_ann_path = dataset_dir / "annotations" / "instances_train.json"
+    with open(train_ann_path, encoding="utf-8") as f:
+        num_train_images = len(json.load(f).get("images", []))
+    iters_per_epoch = max(1, num_train_images // batch_size)
+    warmup_iters = max(100, min(1000, iters_per_epoch))
+    for sched in cfg.get("param_scheduler", []):
+        if isinstance(sched, dict) and sched.get("type") == "LinearLR":
+            sched["end"] = warmup_iters
+    # The config's PipelineSwitchHook (switch_epoch=280) drops mosaic/mixup
+    # for the final 20 epochs of the default 300-epoch schedule.  Rescale to
+    # the final ~7% of our actual epoch count (min 1 to always fire).
+    # Similarly, dynamic_intervals switches val from every-10 to every-1 at
+    # the same epoch; rescale it to match.
+    stage2_start = max(1, int(epochs * 280 / 300))
+    for hook in cfg.get("custom_hooks", []):
+        if isinstance(hook, dict) and hook.get("type") == "PipelineSwitchHook":
+            hook["switch_epoch"] = stage2_start
+    if "dynamic_intervals" in cfg.train_cfg:
+        cfg.train_cfg["dynamic_intervals"] = [(stage2_start, 1)]
+    # Validate more often than the config's default val_interval=10 so that
+    # save_best has finer granularity.  ~20 validation runs per training.
+    cfg.train_cfg["val_interval"] = max(1, epochs // 20)
+
     cfg.randomness = {"seed": int(resolved_cfg.get("seed", 42)), "deterministic": True}
     cfg.default_hooks.setdefault("checkpoint", {})
     cfg.default_hooks["checkpoint"]["save_best"] = "coco/bbox_mAP"
-    cfg.default_hooks["checkpoint"].setdefault("rule", "greater")
-    cfg.default_hooks["checkpoint"].setdefault("max_keep_ckpts", 1)
+    cfg.default_hooks["checkpoint"]["rule"] = "greater"
+    cfg.default_hooks["checkpoint"]["max_keep_ckpts"] = 1
 
     _configure_dataset(
         cfg.train_dataloader["dataset"],
@@ -497,12 +546,24 @@ def train_rtmdet_backend(
         _configure_evaluator_ann_file(cfg.test_evaluator, ann_file=evaluator_ann_file)
 
     cfg.train_dataloader["batch_size"] = int(resolved_cfg["batch_size"])
+    cfg.optim_wrapper["accumulative_counts"] = int(resolved_cfg["rtmdet_accum"])
+    # Preserve negative/background images (no annotations) in training.
+    # The default config drops them (filter_empty_gt=True) which is fine for
+    # COCO pre-training but can hurt fine-tuning when the dataset includes
+    # intentional hard-negative examples.
+    train_dataset = cfg.train_dataloader["dataset"]
+    if "dataset" in train_dataset and isinstance(train_dataset["dataset"], dict):
+        train_dataset = train_dataset["dataset"]
+    if "filter_cfg" in train_dataset:
+        train_dataset["filter_cfg"]["filter_empty_gt"] = False
     # Disable persistent workers so dataloader workers exit cleanly at the end
     # of each epoch (and after training) rather than staying alive until the
     # Runner is garbage-collected.  persistent_workers=True causes a race
     # between worker teardown and the QueueFeederThread, which produces
     # spurious "Bad file descriptor" / semaphore-over-release warnings.
     # Validation runs with num_workers=0 (same pattern as evaluate_stage).
+    train_num_workers = min(4, os.cpu_count() or 2)
+    cfg.train_dataloader["num_workers"] = train_num_workers
     cfg.train_dataloader["persistent_workers"] = False
     cfg.val_dataloader["num_workers"] = 0
     cfg.val_dataloader["persistent_workers"] = False
@@ -510,14 +571,15 @@ def train_rtmdet_backend(
         cfg.test_dataloader["num_workers"] = 0
         cfg.test_dataloader["persistent_workers"] = False
     _set_num_classes(cfg["model"], len(classes_tuple))
+    _convert_syncbn_to_bn(cfg["model"])
     _patch_pipeline_scales(cfg, int(resolved_cfg["image_size"]))
+    _fix_mosaic_pipeline_resize(cfg, int(resolved_cfg["image_size"]))
 
-    if resolved_cfg.get("rtmdet_lr") is not None:
-        opt_wrapper = cfg.get("optim_wrapper")
-        if isinstance(opt_wrapper, dict):
-            optimizer = opt_wrapper.get("optimizer")
-            if isinstance(optimizer, dict) and "lr" in optimizer:
-                optimizer["lr"] = float(resolved_cfg["rtmdet_lr"])
+    opt_wrapper = cfg.get("optim_wrapper")
+    if isinstance(opt_wrapper, dict):
+        optimizer = opt_wrapper.get("optimizer")
+        if isinstance(optimizer, dict) and "lr" in optimizer:
+            optimizer["lr"] = float(resolved_cfg["rtmdet_lr"])
 
     runner = Runner.from_cfg(cfg)
     # mmengine 0.10.x predates the PyTorch 2.6 weights_only=True default and
@@ -556,7 +618,7 @@ def train_rtmdet_backend(
         model_config_path=str(local_config),
         config_name=variant,
         cache_dir=str(resolved_cfg.get("rtmdet_cache_dir") or "models/pretrained/rtmdet"),
-        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", True)),
+        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", False)),
     )
 
     if bool(resolved_cfg.get("rtmdet_cleanup_tmp", False)):
@@ -582,37 +644,8 @@ def train_backend(
     )
 
 
-def load_mmdet_baseline(*, weights_path: Path, metadata: dict, display_name: str):
-    """Backward-compatible alias for legacy call sites."""
-    return load_rtmdet_baseline(
-        weights_path=weights_path,
-        metadata=metadata,
-        display_name=display_name,
-    )
-
-
-def train_mmdet_backend(
-    *,
-    training_path: Path,
-    test_path: Path,
-    dataset_name: str,
-    resolved_cfg: dict,
-    experiment_name: str | None,
-) -> tuple[object, Path, str, int, int]:
-    """Backward-compatible alias for legacy call sites."""
-    return train_rtmdet_backend(
-        training_path=training_path,
-        test_path=test_path,
-        dataset_name=dataset_name,
-        resolved_cfg=resolved_cfg,
-        experiment_name=experiment_name,
-    )
-
-
 __all__ = [
     "train_backend",
     "train_rtmdet_backend",
-    "train_mmdet_backend",
     "load_rtmdet_baseline",
-    "load_mmdet_baseline",
 ]

@@ -45,6 +45,7 @@ BASE_PARAMS: Dict[str, Any] = {
         "rfdetr-nano": {
             "backend": "rfdetr",
             "variant": "nano",
+            "pretrain_weights": "models/pretrained/rfdetr/rf-detr-nano.pth",
             "resolution": 320,
             "epochs": 1,
             "batch_size": 1,
@@ -73,6 +74,56 @@ def _merge_dict(target: dict, overrides: dict) -> dict:
         else:
             target[key] = value
     return target
+
+
+def _resolve_workspace_path(workspace: Path, raw_path: str | None) -> Path | None:
+    if not raw_path:
+        return None
+    candidate = Path(str(raw_path)).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    return candidate
+
+
+def create_local_yolo_checkpoint(
+    workspace: Path,
+    *,
+    checkpoint_path: str = "yolov8n.pt",
+    payload: bytes = b"stub-yolo-checkpoint",
+) -> Path:
+    resolved_path = _resolve_workspace_path(workspace, checkpoint_path)
+    if resolved_path is None:
+        raise ValueError("checkpoint_path must be provided for local YOLO checkpoint creation.")
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_bytes(payload)
+    return resolved_path
+
+
+def create_baseline_artifact(
+    workspace: Path,
+    *,
+    weights_path: str = "models/current_best/best.pt",
+    experiment_name: str = "baseline",
+    model_backend: str = "yolo",
+    image_size: int = 320,
+    model_variant: str | None = None,
+) -> Path:
+    baseline_path = _resolve_workspace_path(workspace, weights_path)
+    if baseline_path is None:
+        raise ValueError("weights_path must be provided for baseline artifact creation.")
+
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_bytes(b"baseline-stub")
+    metadata = {
+        "experiment_name": experiment_name,
+        "model_backend": model_backend,
+        "image_size": int(image_size),
+    }
+    if model_variant:
+        metadata["model_variant"] = str(model_variant)
+    with open(baseline_path.parent / "metadata.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(metadata, f, sort_keys=False)
+    return baseline_path
 
 
 def write_params_yaml(workspace: Path, overrides: dict | None = None) -> dict:

@@ -38,8 +38,9 @@ The pipeline is split into three explicit lifecycle stages:
 3. **Evaluate** (`--stage evaluate`)
    - Loads the trained model (from the persisted pointer if needed)
    - Resolves a baseline model for comparison
-   - Writes `metrics.json` and results under `results_comparison/`
-   - Organizes plots/metadata into the run folder
+   - Writes `metrics.json`
+   - Writes run-owned artifacts into `runs/<run_name>/`
+   - Writes summary-only comparison outputs to `results_comparison/` (`results.csv`, `results.txt`)
 
 ## Running
 
@@ -163,12 +164,13 @@ models:
   rfdetr-medium:
     backend: rfdetr
     variant: medium
+    pretrain_weights: models/pretrained/rfdetr/rf-detr-medium.pth
     resolution: 1280
   rtmdet-m:
     backend: rtmdet
     config_name: rtmdet_m_8xb32-300e_coco
     cache_dir: models/pretrained/rtmdet
-    allow_download: true
+    allow_download: false
 
 evaluation:
   baseline_weights_path: models/current_best/best.pt
@@ -181,27 +183,31 @@ evaluation:
 
 ### Baseline & fine-tune weights
 
-- `evaluation.baseline_weights_path` is optional: if it is missing or an empty file, the pipeline falls back to the selected model’s checkpoint (for YOLO: an official Ultralytics checkpoint).
+- `evaluation.baseline_weights_path` is optional. If no `metadata.yaml` exists next to that path yet, evaluation runs on the trained model only (no baseline comparisons). If `metadata.yaml` exists, the weights file must also exist and be non-empty (otherwise evaluation fails loudly and you need to fetch/export the baseline).
 - Fine-tuning weights (`train.finetune.weights`) are required when `train.finetune.enabled: true` and must be a non-empty file.
+- Use `python -m train --stage bootstrap` to fetch the selected model assets (and optionally the promoted baseline) explicitly.
+- Use `python -m train --stage bootstrap --all-models` to prefetch every configured model for backend-heavy testing or CI.
 
 ## Backends
 
 ### Ultralytics YOLO (`backend: yolo`)
 
 - Uses `ultralytics.YOLO`.
-- `models.<key>.checkpoint` can be an official checkpoint name (downloaded by Ultralytics) or a local `.pt` file.
+- `models.<key>.checkpoint` must point to a local, non-empty `.pt` file.
 - Fine-tuning is supported via `train.finetune.*`.
 
 ### RF-DETR (`backend: rfdetr`)
 
 - Uses the `rfdetr` Python package.
 - `rfdetr` is a standard project dependency (installed via Poetry with the rest of the repo).
+- `models.<key>.pretrain_weights` is required and must point to a local, non-empty checkpoint file.
 - The backend trains via RF-DETR’s Roboflow dataset loader; the pipeline creates a tiny bridge layout under `.tmp/` and cleans it up after training.
 - RF-DETR resolution has divisibility constraints; the pipeline will auto-adjust and print a warning if needed.
 
 ### RTMDet / MMDetection (`backend: rtmdet`)
 
 - Requires `mmdet`, `mmengine`, and **full `mmcv` ops** (`mmcv`, not `mmcv-lite`).
+- Configs/checkpoints must already exist locally in the configured cache/path; the pipeline does not auto-download them during runs.
 - Uses a temporary COCO export under `.tmp/` for training and evaluation.
 - You can predownload configs/checkpoints for reproducible offline runs:
 
@@ -302,15 +308,15 @@ train:
 
 Notes:
 
-- Fine-tuning rejects missing/empty placeholder weight files.
-- When fine-tuning, evaluation compares against the configured finetune weights (if available) before falling back to the general baseline.
+- Fine-tuning rejects missing or empty weight files.
+- Evaluation compares against the configured baseline when it is available; it does not substitute fine-tune weights or alternate checkpoints.
 
 ## Outputs
 
 - Prepared datasets: `datasets/<dataset_name>/train` and `datasets/<dataset_name>/test`
-- Training runs: `runs/` (backend-specific subfolders) with `weights/best.pt` + `metadata.yaml`
+- Training runs: `runs/<run_name>/` for all backends, with `weights/best.pt`, `metadata.yaml`, `plots/`, run-level `results.csv`/`results.txt`, and evaluation artifacts
 - Metrics JSON: `metrics.json`
-- Results table: `results_comparison/results.csv` (and formatted `results.txt`)
+- Results summary: `results_comparison/results.csv` and `results_comparison/results.txt` only
 - Persisted pointer for evaluate: `runs/.last_train_result.json`
 
 ## Testing

@@ -154,7 +154,12 @@ def _format_merged_class_table(csv_path):
     return "\n".join(output_parts)
 
 
-def create_formatted_table(csv_path, *, output_dir: Path | None = None):
+def create_formatted_table(
+    csv_path,
+    *,
+    output_dir: Path | None = None,
+    include_details: bool = True,
+):
     csv_path = Path(csv_path)
     target_dir = Path(output_dir) if output_dir is not None else csv_path.parent
 
@@ -235,43 +240,44 @@ def create_formatted_table(csv_path, *, output_dir: Path | None = None):
         f.write("Metric Descriptions:\n")
         f.write(formatted_descriptions)
 
-        per_class_csv_path = target_dir / "per_class_results.csv"
-        if per_class_csv_path.exists():
-            f.write("\n\n")
-            f.write("=" * 80)
-            f.write("\nPer-Class Metrics:\n")
-            f.write("=" * 80)
-            f.write("\n\n")
-            per_class_table = _format_per_class_table(per_class_csv_path)
-            f.write(per_class_table)
-            f.write("\n")
-            f.write("Per-class metric descriptions:\n")
-            f.write("  precision: Fraction of correct positive predictions for this class (at best-F1 confidence).\n")
-            f.write("  recall:    Fraction of actual positives correctly detected for this class (at best-F1 confidence).\n")
-            f.write("  ap50:      Average Precision at IoU threshold 0.5 for this class.\n")
-            f.write("  ap:        Average Precision across IoU 0.5-0.95 for this class.\n")
-            f.write("  f1_score:  Harmonic mean of precision and recall for this class (at best-F1 confidence).\n")
+        if include_details:
+            per_class_csv_path = target_dir / "per_class_results.csv"
+            if per_class_csv_path.exists():
+                f.write("\n\n")
+                f.write("=" * 80)
+                f.write("\nPer-Class Metrics:\n")
+                f.write("=" * 80)
+                f.write("\n\n")
+                per_class_table = _format_per_class_table(per_class_csv_path)
+                f.write(per_class_table)
+                f.write("\n")
+                f.write("Per-class metric descriptions:\n")
+                f.write("  precision: Fraction of correct positive predictions for this class (at best-F1 confidence).\n")
+                f.write("  recall:    Fraction of actual positives correctly detected for this class (at best-F1 confidence).\n")
+                f.write("  ap50:      Average Precision at IoU threshold 0.5 for this class.\n")
+                f.write("  ap:        Average Precision across IoU 0.5-0.95 for this class.\n")
+                f.write("  f1_score:  Harmonic mean of precision and recall for this class (at best-F1 confidence).\n")
 
-        merged_csv_path = target_dir / "merged_class_results.csv"
-        if merged_csv_path.exists():
-            f.write("\n\n")
-            f.write("=" * 80)
-            f.write("\nMerged-Class Subset Metrics:\n")
-            f.write("(Evaluation on test images that originally contained the source class\n")
-            f.write(" before it was merged into the target class during training)\n")
-            f.write("=" * 80)
-            f.write("\n\n")
-            merged_table = _format_merged_class_table(merged_csv_path)
-            f.write(merged_table)
-            f.write("\n")
-            f.write("Merged-class metric descriptions:\n")
-            f.write("  merged_class: Source class -> target class it was merged into.\n")
-            f.write("  n_objects:    Number of source-class annotations (objects) in the subset.\n")
-            f.write("  precision:    Precision on this image subset (all classes).\n")
-            f.write("  recall:       Recall on this image subset (all classes).\n")
-            f.write("  ap50:         mAP@50 on this image subset (all classes).\n")
-            f.write("  ap:           mAP@50-95 on this image subset (all classes).\n")
-            f.write("  f1_score:     F1 score on this image subset (all classes).\n")
+            merged_csv_path = target_dir / "merged_class_results.csv"
+            if merged_csv_path.exists():
+                f.write("\n\n")
+                f.write("=" * 80)
+                f.write("\nMerged-Class Subset Metrics:\n")
+                f.write("(Evaluation on test images that originally contained the source class\n")
+                f.write(" before it was merged into the target class during training)\n")
+                f.write("=" * 80)
+                f.write("\n\n")
+                merged_table = _format_merged_class_table(merged_csv_path)
+                f.write(merged_table)
+                f.write("\n")
+                f.write("Merged-class metric descriptions:\n")
+                f.write("  merged_class: Source class -> target class it was merged into.\n")
+                f.write("  n_objects:    Number of source-class annotations (objects) in the subset.\n")
+                f.write("  precision:    Precision on this image subset (all classes).\n")
+                f.write("  recall:       Recall on this image subset (all classes).\n")
+                f.write("  ap50:         mAP@50 on this image subset (all classes).\n")
+                f.write("  ap:           mAP@50-95 on this image subset (all classes).\n")
+                f.write("  f1_score:     F1 score on this image subset (all classes).\n")
 
 
 def write_merged_class_results(output_dir, all_model_results):
@@ -350,6 +356,8 @@ def mean_table(
     base_model_name=None,
     *,
     output_dir: Path | None = None,
+    include_per_class: bool = False,
+    include_details: bool = False,
 ):
     basic_columns = [
         "MODEL",
@@ -411,18 +419,19 @@ def mean_table(
         for row_dict in existing_rows:
             writer.writerow([row_dict.get(col, "") for col in merged_columns])
 
-    per_class_csv_path = target_dir / "per_class_results.csv"
-    if base_run and path_results1 is not None:
-        base_display = base_model_name if base_model_name else "YOLOv8m (base run)"
-        per_class_base = path_results1.get("per_class", {})
-        if per_class_base:
-            _append_per_class_to_csv(per_class_csv_path, per_class_base, base_display)
+    if include_per_class:
+        per_class_csv_path = target_dir / "per_class_results.csv"
+        if base_run and path_results1 is not None:
+            base_display = base_model_name if base_model_name else "YOLOv8m (base run)"
+            per_class_base = path_results1.get("per_class", {})
+            if per_class_base:
+                _append_per_class_to_csv(per_class_csv_path, per_class_base, base_display)
 
-    per_class_retrained = path_results2.get("per_class", {}) if path_results2 else {}
-    if per_class_retrained:
-        _append_per_class_to_csv(per_class_csv_path, per_class_retrained, experiment_name)
+        per_class_retrained = path_results2.get("per_class", {}) if path_results2 else {}
+        if per_class_retrained:
+            _append_per_class_to_csv(per_class_csv_path, per_class_retrained, experiment_name)
 
-    create_formatted_table(csv_path, output_dir=target_dir)
+    create_formatted_table(csv_path, output_dir=target_dir, include_details=include_details)
 
 
 __all__ = [

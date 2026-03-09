@@ -17,6 +17,27 @@ def YOLO(*args, **kwargs):
     return UltralyticsYOLO(*args, **kwargs)
 
 
+def _resolve_required_weights(path_like: str | Path, *, label: str) -> Path:
+    candidate = Path(path_like).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if not candidate.exists():
+        if label == "train.finetune.weights":
+            raise FileNotFoundError(
+                "Fine-tuning mode is enabled, but "
+                f"{label} does not exist: {candidate}"
+            )
+        raise FileNotFoundError(f"{label} does not exist: {candidate}")
+    if candidate.stat().st_size == 0:
+        if label == "train.finetune.weights":
+            raise FileNotFoundError(
+                "Fine-tuning mode is enabled, but "
+                f"{label} is empty: {candidate}"
+            )
+        raise FileNotFoundError(f"{label} is empty: {candidate}")
+    return candidate
+
+
 def _resolve_save_dir(model, results, default: Path) -> Path:
     """Return Ultralytics' actual save_dir if available, else default.
 
@@ -69,31 +90,25 @@ def train_model(
         Path: Directory path of the training output.
     """
     # Choose model based on fine-tuning mode
-    pretrained_model = None
-    if pretrained_model_path:
-        candidate = Path(pretrained_model_path)
-        if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
-        if candidate.exists() and candidate.stat().st_size > 0:
-            pretrained_model = candidate
-
     if finetune_mode:
         if not pretrained_model_path:
             raise ValueError(
                 "Fine-tuning mode is enabled, but train.finetune.weights is not set."
             )
-        if pretrained_model is None:
-            raise FileNotFoundError(
-                "Fine-tuning mode is enabled, but the configured weights are missing or still "
-                f"the 0-byte DVC placeholder: {pretrained_model_path}"
-            )
-        print(f"Fine-tuning mode enabled. Loading pre-trained model: {pretrained_model_path}")
+        pretrained_model = _resolve_required_weights(
+            str(pretrained_model_path),
+            label="train.finetune.weights",
+        )
+        print(f"Fine-tuning mode enabled. Loading pre-trained model: {pretrained_model}")
         model = YOLO(str(pretrained_model))
         experiment_name = f"{experiment_name}-finetune"
     else:
-        checkpoint_name = str(checkpoint)
-        print(f"Using YOLO checkpoint: {checkpoint_name}")
-        model = YOLO(checkpoint_name)
+        checkpoint_path = _resolve_required_weights(
+            str(checkpoint),
+            label="models.<key>.checkpoint",
+        )
+        print(f"Using YOLO checkpoint: {checkpoint_path}")
+        model = YOLO(str(checkpoint_path))
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -117,7 +132,10 @@ def train_model(
         "batch": batch_size,
         "device": device,
         "workers": 4,
-        "amp": True,
+        # Keep runtime offline/strict: Ultralytics' AMP checks auto-download
+        # YOLO11n if it's missing. Users can explicitly re-enable AMP via
+        # single_phase_overrides={"amp": True} once assets are provisioned.
+        "amp": False,
         "project": project,
     }
     if name:
@@ -180,7 +198,6 @@ def train_yolo(
             if experiment_name
             and bool(resolved_cfg.get("finetune_mode", False))
             and resolved_cfg.get("pretrained_model_path")
-            and Path(str(resolved_cfg.get("pretrained_model_path"))).exists()
             else experiment_name
         )
     )
@@ -200,6 +217,9 @@ def train_backend(
         resolved_cfg=resolved_cfg,
         experiment_name=experiment_name,
     )
+    model.model_backend = "yolo"
+    model.model_variant = str(resolved_cfg["model_key"])
+    model.resolution = int(resolved_cfg["image_size"])
     return (
         model,
         train_output_dir,

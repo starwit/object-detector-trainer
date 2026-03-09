@@ -3,7 +3,7 @@
 This module exists to keep one source of truth for:
 1) persisted train-result schema (runs/.last_train_result.json),
 2) loading a trained model from saved weights/metadata,
-3) baseline resolution fallback order.
+3) strict baseline/model artifact loading.
 
 Both train_stage and evaluate_stage use these functions to avoid duplicated
 state/weight-loading behavior and drift.
@@ -31,14 +31,8 @@ class PersistedTrainResult:
     train_epochs: int
     training_path: Path
     test_path: Path
-    baseline_weights_path: str | None
-    fallback_checkpoint: str
-    finetune_weights_path: str | None
     best_weights_path: Path
     reload_metadata: dict[str, Any]
-
-
-_PERSISTED_RESULT_VERSION = 1
 
 
 def _runs_root() -> Path:
@@ -64,22 +58,15 @@ def persist_train_result(
     train_epochs: int,
     training_path: Path,
     test_path: Path,
-    baseline_weights_path: str | None,
-    fallback_checkpoint: str,
-    finetune_weights_path: str | None,
     reload_metadata: dict[str, Any],
 ) -> None:
     payload = {
-        "version": _PERSISTED_RESULT_VERSION,
         "train_output_dir": str(train_output_dir),
         "experiment_name": experiment_name,
         "image_size": int(image_size),
         "train_epochs": int(train_epochs),
         "training_path": str(training_path),
         "test_path": str(test_path),
-        "baseline_weights_path": baseline_weights_path,
-        "fallback_checkpoint": fallback_checkpoint,
-        "finetune_weights_path": finetune_weights_path,
         "best_weights_path": str(train_output_dir / "weights" / "best.pt"),
         "reload_metadata": reload_metadata,
     }
@@ -109,15 +96,18 @@ def _weight_candidate_status(path_candidate: str | Path | None) -> tuple[Path | 
     return candidate_path, "ready"
 
 
+def _require_ready_weight(path_candidate: str | Path | None, *, label: str) -> Path:
+    candidate_path, status = _weight_candidate_status(path_candidate)
+    if status == "ready" and candidate_path is not None:
+        return candidate_path
+    raise FileNotFoundError(f"{label} must point to an existing non-empty file ({status}).")
+
+
 def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(
             f"Invalid persisted train result at {path}: expected JSON object, got {type(payload)}."
         )
-
-    version = payload.get("version", 0)
-    if version not in {0, _PERSISTED_RESULT_VERSION}:
-        raise ValueError(f"Unsupported persisted train result version {version!r} at {path}.")
 
     required_keys = (
         "train_output_dir",
@@ -126,7 +116,7 @@ def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
         "train_epochs",
         "training_path",
         "test_path",
-        "fallback_checkpoint",
+        "best_weights_path",
     )
     missing = [k for k in required_keys if k not in payload]
     if missing:
@@ -134,7 +124,7 @@ def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
             f"Invalid persisted train result at {path}: missing keys {', '.join(missing)}."
         )
 
-    for key in ("train_output_dir", "experiment_name", "training_path", "test_path", "fallback_checkpoint"):
+    for key in ("train_output_dir", "experiment_name", "training_path", "test_path", "best_weights_path"):
         if not isinstance(payload.get(key), str):
             raise ValueError(
                 f"Invalid persisted train result at {path}: key '{key}' must be a string."
@@ -146,28 +136,9 @@ def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
                 f"Invalid persisted train result at {path}: key '{key}' must be an integer."
             )
 
-    baseline_weights_path = payload.get("baseline_weights_path")
-    if baseline_weights_path is not None and not isinstance(baseline_weights_path, str):
-        raise ValueError(
-            f"Invalid persisted train result at {path}: key 'baseline_weights_path' must be a string or null."
-        )
-    finetune_weights_path = payload.get("finetune_weights_path")
-    if finetune_weights_path is not None and not isinstance(finetune_weights_path, str):
-        raise ValueError(
-            f"Invalid persisted train result at {path}: key 'finetune_weights_path' must be a string or null."
-        )
-
     reload_metadata = payload.get("reload_metadata", {})
     if not isinstance(reload_metadata, dict):
         reload_metadata = {}
-
-    best_weights_path = payload.get("best_weights_path")
-    if version == 0 and best_weights_path is None:
-        best_weights_path = str(Path(payload["train_output_dir"]) / "weights" / "best.pt")
-    if not isinstance(best_weights_path, str):
-        raise ValueError(
-            f"Invalid persisted train result at {path}: key 'best_weights_path' must be a string."
-        )
 
     return {
         "train_output_dir": payload["train_output_dir"],
@@ -176,10 +147,7 @@ def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
         "train_epochs": payload["train_epochs"],
         "training_path": payload["training_path"],
         "test_path": payload["test_path"],
-        "baseline_weights_path": baseline_weights_path,
-        "fallback_checkpoint": payload["fallback_checkpoint"],
-        "finetune_weights_path": finetune_weights_path,
-        "best_weights_path": best_weights_path,
+        "best_weights_path": payload["best_weights_path"],
         "reload_metadata": reload_metadata,
     }
 
@@ -202,9 +170,6 @@ def load_persisted_train_result() -> PersistedTrainResult:
         train_epochs=int(normalized["train_epochs"]),
         training_path=Path(normalized["training_path"]),
         test_path=Path(normalized["test_path"]),
-        baseline_weights_path=normalized["baseline_weights_path"],
-        fallback_checkpoint=str(normalized["fallback_checkpoint"]),
-        finetune_weights_path=normalized["finetune_weights_path"],
         best_weights_path=Path(normalized["best_weights_path"]),
         reload_metadata=normalized["reload_metadata"],
     )
@@ -213,10 +178,8 @@ def load_persisted_train_result() -> PersistedTrainResult:
 def load_model_from_weights(
     path_candidate: str | Path | None,
     metadata_override: dict[str, object] | None = None,
-) -> tuple[object | None, str | None]:
-    candidate_path, status = _weight_candidate_status(path_candidate)
-    if status != "ready" or candidate_path is None:
-        return None, None
+) -> tuple[object, str]:
+    candidate_path = _require_ready_weight(path_candidate, label="Model weights")
 
     meta: dict[str, object] = {}
     for meta_path in (
@@ -232,6 +195,11 @@ def load_model_from_weights(
             break
     if isinstance(metadata_override, dict):
         meta.update(metadata_override)
+    if not meta:
+        raise FileNotFoundError(
+            f"Missing metadata.yaml for model weights: {candidate_path}. "
+            "Baseline and reload artifacts must include model metadata."
+        )
 
     display_name = (
         meta.get("experiment_name")
@@ -240,11 +208,12 @@ def load_model_from_weights(
         or candidate_path.stem
     )
 
-    backend_raw = str(meta.get("model_backend", "yolo")).strip().lower()
-    try:
-        backend = normalize_backend_name(backend_raw)
-    except ValueError:
-        backend = backend_raw
+    backend_raw = str(meta.get("model_backend", "")).strip().lower()
+    if not backend_raw:
+        raise ValueError(
+            f"Model metadata for {candidate_path} must define 'model_backend'."
+        )
+    backend = normalize_backend_name(backend_raw)
     if backend == "rfdetr":
         from object_detector_trainer.backends import rfdetr as core_rfdetr
 
@@ -276,39 +245,27 @@ def load_model_from_weights(
         return adapter, str(display_name)
 
     model_instance = _load_yolo_model(str(candidate_path))
+    setattr(model_instance, "model_backend", backend)
+    setattr(model_instance, "model_name", str(display_name))
+    if meta.get("model_variant"):
+        setattr(model_instance, "model_variant", str(meta["model_variant"]))
+    if meta.get("image_size") is not None:
+        setattr(model_instance, "resolution", int(meta["image_size"]))
+    class_names = meta.get("class_names")
+    if isinstance(class_names, dict) and class_names:
+        setattr(model_instance, "class_names", {int(k): str(v) for k, v in class_names.items()})
     return model_instance, str(display_name)
 
 
 def resolve_baseline_model(
     baseline_weights_path: str | None,
-    fallback_checkpoint: str,
-    finetune_weights_path: str | None = None,
 ) -> tuple[object, str]:
-    baseline_candidate, baseline_status = _weight_candidate_status(baseline_weights_path)
+    baseline_candidate = _require_ready_weight(
+        baseline_weights_path,
+        label="evaluation.baseline_weights_path",
+    )
     baseline_model, baseline_display_name = load_model_from_weights(baseline_candidate)
-    if baseline_model is not None:
-        return baseline_model, (baseline_display_name or "baseline")
-
-    reason_lines = [f"baseline candidate: {baseline_status}"]
-
-    if finetune_weights_path:
-        secondary_path, secondary_status = _weight_candidate_status(finetune_weights_path)
-        if baseline_candidate is None or str(baseline_candidate) != str(secondary_path):
-            baseline_model, baseline_display_name = load_model_from_weights(secondary_path)
-            if baseline_model is not None:
-                return baseline_model, (baseline_display_name or Path(finetune_weights_path).stem)
-            reason_lines.append(f"finetune candidate: {secondary_status}")
-
-    baseline_checkpoint = str(fallback_checkpoint)
-    try:
-        baseline_model = _load_yolo_model(baseline_checkpoint)
-    except Exception as e:
-        raise RuntimeError(
-            "Failed to load a baseline model. "
-            + " ; ".join(reason_lines)
-            + f" ; fallback checkpoint load failed: {baseline_checkpoint}"
-        ) from e
-    return baseline_model, f"{Path(baseline_checkpoint).stem}-coco"
+    return baseline_model, (baseline_display_name or "baseline")
 
 
 __all__ = [

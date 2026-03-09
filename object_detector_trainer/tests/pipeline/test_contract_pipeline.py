@@ -13,7 +13,13 @@ from object_detector_trainer.cli import run_all_stages
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
-from object_detector_trainer.tests.support.pipeline_test_utils import create_minimal_dataset, write_params_yaml
+from object_detector_trainer.tests.support.pipeline_test_utils import (
+    BASE_PARAMS,
+    create_baseline_artifact,
+    create_local_yolo_checkpoint,
+    create_minimal_dataset,
+    write_params_yaml,
+)
 from object_detector_trainer.tests.support.ultralytics_stub import StubYOLO
 
 
@@ -26,6 +32,19 @@ REQUIRED_METRIC_KEYS = (
     "f1_score",
     "ms_per_frame",
 )
+
+
+def _discover_backend_cases() -> list[tuple[str, str]]:
+    cases: dict[str, str] = {}
+    models_cfg = BASE_PARAMS.get("models", {})
+    if not isinstance(models_cfg, dict):
+        return []
+    for model_key, model_cfg in sorted(models_cfg.items()):
+        if not isinstance(model_cfg, dict):
+            continue
+        backend = str(model_cfg["backend"]).strip().lower()
+        cases.setdefault(backend, str(model_key))
+    return [(model_key, backend) for backend, model_key in sorted(cases.items())]
 
 
 class _ContractBox:
@@ -135,6 +154,17 @@ def _latest_metadata_file(runs_dir: Path) -> Path:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _assert_summary_only_results(summary_dir: Path) -> None:
+    _assert_results_csv_contract(summary_dir / "results.csv")
+    assert (summary_dir / "results.txt").exists()
+    extras = sorted(
+        entry.name
+        for entry in summary_dir.iterdir()
+        if entry.name not in {"results.csv", "results.txt"}
+    )
+    assert not extras, f"results_comparison must contain summary artifacts only, found: {extras}"
+
+
 @pytest.fixture
 def contract_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
@@ -145,9 +175,7 @@ def contract_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) -> None:
-    baseline_path = workspace / "models" / "current_best" / "best.pt"
-    baseline_path.parent.mkdir(parents=True, exist_ok=True)
-    baseline_path.write_bytes(b"baseline-stub")
+    baseline_path = create_baseline_artifact(workspace)
 
     common = {
         "data": {"dataset_name": dataset_name},
@@ -162,6 +190,7 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
             "rfdetr-nano": {
                 "backend": "rfdetr",
                 "variant": "nano",
+                "pretrain_weights": "models/pretrained/rfdetr/rf-detr-nano.pth",
                 "resolution": 320,
                 "epochs": 1,
                 "batch_size": 1,
@@ -183,12 +212,14 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
         raise AssertionError(f"Unsupported model for test setup: {model}")
 
     write_params_yaml(workspace, common)
+    if model == "yolov8n":
+        create_local_yolo_checkpoint(workspace)
 
 
 def _patch_lightweight_trainers(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     def _mk_runner(backend: str):
         def _runner(*args, **kwargs):
-            run_dir = workspace / "runs" / backend / f"{backend}-contract"
+            run_dir = workspace / "runs" / f"{backend}-contract"
             (run_dir / "weights").mkdir(parents=True, exist_ok=True)
             (run_dir / "weights" / "best.pt").write_bytes(b"trained-stub")
             model = _ContractModel(model_name=f"{backend}-contract", model_backend=backend, image_size=320)
@@ -227,8 +258,10 @@ def test_stage_contract_prepare_train_evaluate_all(
 
     run_evaluate_stage(args, train_result=train_out)
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
-    _assert_results_csv_contract(contract_workspace / "results_comparison" / "results.csv")
-    assert (contract_workspace / "results_comparison" / "results.txt").exists()
+    _assert_summary_only_results(contract_workspace / "results_comparison")
+    assert (train_out.train_output_dir / "metadata.yaml").exists()
+    assert (train_out.train_output_dir / "results.csv").exists()
+    assert (train_out.train_output_dir / "results.txt").exists()
 
     # all-stage flow should also satisfy the same contracts end-to-end
     create_minimal_dataset(contract_workspace)
@@ -236,16 +269,12 @@ def test_stage_contract_prepare_train_evaluate_all(
     args_all = _contract_args(dataset_name="contract-all", model="yolov8n")
     run_all_stages(args_all)
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
-    _assert_results_csv_contract(contract_workspace / "results_comparison" / "results.csv")
+    _assert_summary_only_results(contract_workspace / "results_comparison")
 
 
 @pytest.mark.parametrize(
     ("model_key", "expected_backend"),
-    [
-        ("yolov8n", "yolo"),
-        ("rfdetr-nano", "rfdetr"),
-        ("rtmdet-tiny", "rtmdet"),
-    ],
+    _discover_backend_cases(),
 )
 def test_backend_metric_contracts(
     contract_workspace: Path,
@@ -261,7 +290,7 @@ def test_backend_metric_contracts(
     run_all_stages(args)
 
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
-    _assert_results_csv_contract(contract_workspace / "results_comparison" / "results.csv")
+    _assert_summary_only_results(contract_workspace / "results_comparison")
     metadata_path = _latest_metadata_file(contract_workspace / "runs")
     metadata = json.loads("{}")
     if metadata_path.exists():

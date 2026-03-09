@@ -18,9 +18,13 @@ def run_prepare_stage(args, config=None) -> Path:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
 
     dataset_name = Path(getattr(args, "dataset_name", None) or cfg.data.dataset_name)
-    val_split = float(getattr(args, "val_split", cfg.prepare.val_split))
+    raw_val_split = getattr(args, "val_split", None)
+    val_split = float(cfg.prepare.val_split if raw_val_split is None else raw_val_split)
     recreate_dataset = bool(getattr(args, "recreate_dataset", False))
-    augment_multiplier = int(getattr(args, "augment_multiplier", cfg.prepare.augment_multiplier))
+    raw_augment_multiplier = getattr(args, "augment_multiplier", None)
+    augment_multiplier = int(
+        cfg.prepare.augment_multiplier if raw_augment_multiplier is None else raw_augment_multiplier
+    )
 
     folder_subsets = resolve_folder_subsets(
         cfg.prepare.folder_subsets,
@@ -41,7 +45,8 @@ def run_prepare_stage(args, config=None) -> Path:
 
     test_data_exists = check_for_test_images(test_image_input_path)
     if not test_data_exists:
-        test_split = float(getattr(args, "test_split", cfg.prepare.test_split))
+        raw_test_split = getattr(args, "test_split", None)
+        test_split = float(cfg.prepare.test_split if raw_test_split is None else raw_test_split)
     else:
         test_split = 0.0
 

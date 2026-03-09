@@ -10,7 +10,9 @@ def _as_mapping(value: Any) -> dict:
 
 
 def normalize_backend_name(model_type: str | None) -> str:
-    raw = (model_type or "yolo")
+    raw = model_type
+    if raw is None:
+        raise ValueError("Model backend must be configured explicitly.")
     if not isinstance(raw, str):
         raw = str(raw)
     compact = "".join(ch for ch in raw.strip().lower() if ch.isalnum())
@@ -18,30 +20,11 @@ def normalize_backend_name(model_type: str | None) -> str:
         return "yolo"
     if compact in {"rfdetr"}:
         return "rfdetr"
-    if compact in {"rtmdet", "mmdet"}:
+    if compact in {"rtmdet"}:
         return "rtmdet"
     raise ValueError(
         f"Unsupported backend: {model_type!r}. Expected one of: yolo | rfdetr | rtmdet"
     )
-
-
-def _default_yolo_checkpoint(model_key: str) -> str:
-    key = str(model_key or "").strip()
-    if key.endswith(".pt"):
-        return key
-    return f"{key}.pt"
-
-
-def _first_yolo_fallback_checkpoint(models_cfg: dict) -> str | None:
-    for model_key in sorted(models_cfg):
-        model_cfg = models_cfg[model_key]
-        if not isinstance(model_cfg, dict):
-            continue
-        backend = normalize_backend_name(model_cfg.get("backend", "yolo"))
-        if backend == "yolo":
-            checkpoint = model_cfg.get("checkpoint")
-            return str(checkpoint) if checkpoint else _default_yolo_checkpoint(str(model_key))
-    return None
 
 
 def resolve_training_config(args, config: AppConfig) -> dict:
@@ -57,7 +40,10 @@ def resolve_training_config(args, config: AppConfig) -> dict:
         raise ValueError(f"Unknown model key '{selected_model}'. Available models: {available}")
 
     model_cfg = _as_mapping(models_cfg.get(selected_model, {}))
-    backend = normalize_backend_name(model_cfg.get("backend", "yolo"))
+    backend_raw = model_cfg.get("backend")
+    if backend_raw is None:
+        raise ValueError(f"models.{selected_model} must define backend explicitly.")
+    backend = normalize_backend_name(backend_raw)
     shared_image_size = int(train_cfg.get("image_size", 640))
     shared_epochs = int(train_cfg.get("epochs", 100))
     shared_batch_size = int(train_cfg.get("batch_size", 8))
@@ -77,11 +63,6 @@ def resolve_training_config(args, config: AppConfig) -> dict:
     if not single_phase_overrides:
         single_phase_overrides = None
 
-    model_checkpoint = str(model_cfg.get("checkpoint") or _default_yolo_checkpoint(str(selected_model)))
-    fallback_checkpoint = model_checkpoint if backend == "yolo" else _first_yolo_fallback_checkpoint(models_cfg)
-    if not fallback_checkpoint:
-        fallback_checkpoint = "yolov8n.pt"
-
     resolved = {
         "model_key": str(selected_model),
         "backend": backend,
@@ -90,7 +71,6 @@ def resolve_training_config(args, config: AppConfig) -> dict:
         "epochs": int(model_cfg.get("epochs", shared_epochs)),
         "batch_size": int(model_cfg.get("batch_size", shared_batch_size)),
         "baseline_weights_path": eval_cfg.get("baseline_weights_path"),
-        "fallback_checkpoint": str(fallback_checkpoint),
         "finetune_mode": finetune_enabled,
         "pretrained_model_path": finetune_weights,
         "finetune_lr": finetune_lr,
@@ -101,6 +81,11 @@ def resolve_training_config(args, config: AppConfig) -> dict:
     }
 
     if backend == "yolo":
+        model_checkpoint = str(model_cfg.get("checkpoint") or "").strip()
+        if not model_checkpoint:
+            raise ValueError(
+                f"models.{selected_model} (backend=yolo) must define checkpoint."
+            )
         resolved["checkpoint"] = model_checkpoint
         if finetune_enabled and finetune_epochs is not None:
             resolved["epochs"] = int(finetune_epochs)
@@ -114,14 +99,29 @@ def resolve_training_config(args, config: AppConfig) -> dict:
                 f"models.{selected_model} (backend=rtmdet) must define either config_name or config_path."
             )
 
+        rtmdet_batch_size = int(model_cfg.get("batch_size", shared_batch_size))
+        explicit_grad_accum = model_cfg.get("grad_accum_steps")
+        target_effective_batch = int(model_cfg.get("target_effective_batch", 32))
+        if explicit_grad_accum is not None:
+            rtmdet_accum = int(explicit_grad_accum)
+        else:
+            rtmdet_accum = max(1, target_effective_batch // rtmdet_batch_size)
+
+        # base_lr=0.004 is the published RTMDet LR for effective BS=256 (8×32).
+        # Derive LR for the chosen effective BS unless the user overrides it explicitly.
+        explicit_lr = model_cfg.get("lr")
+        effective_bs = rtmdet_batch_size * rtmdet_accum
+        rtmdet_lr = float(explicit_lr) if explicit_lr is not None else 0.004 * effective_bs / 256
+
         resolved.update(
             {
                 "rtmdet_config_name": str(config_name) if config_name else None,
                 "rtmdet_config_path": str(config_path) if config_path else None,
                 "rtmdet_checkpoint": str(model_cfg["checkpoint"]) if model_cfg.get("checkpoint") else None,
                 "rtmdet_cache_dir": str(model_cfg.get("cache_dir", "models/pretrained/rtmdet")),
-                "rtmdet_allow_download": bool(model_cfg.get("allow_download", True)),
-                "rtmdet_lr": model_cfg.get("lr"),
+                "rtmdet_allow_download": bool(model_cfg.get("allow_download", False)),
+                "rtmdet_lr": rtmdet_lr,
+                "rtmdet_accum": rtmdet_accum,
                 "rtmdet_device": model_cfg.get("device"),
                 "rtmdet_cleanup_tmp": bool(model_cfg.get("cleanup_tmp", False)),
             }
@@ -135,6 +135,11 @@ def resolve_training_config(args, config: AppConfig) -> dict:
         or model_cfg.get("model")
         or rfdetr_backend._infer_rfdetr_variant(str(selected_model))
     )
+    rfdetr_pretrain = model_cfg.get("pretrain_weights")
+    if not rfdetr_pretrain:
+        raise ValueError(
+            f"models.{selected_model} (backend=rfdetr) must define pretrain_weights."
+        )
     rfdetr_batch_size = int(model_cfg.get("batch_size", shared_batch_size))
     explicit_grad_accum = model_cfg.get("grad_accum_steps")
     target_effective_batch = int(model_cfg.get("target_effective_batch", 16))
@@ -159,7 +164,7 @@ def resolve_training_config(args, config: AppConfig) -> dict:
             "rfdetr_target_effective_batch": target_effective_batch,
             "rfdetr_resolution": int(rfdetr_resolution),
             "rfdetr_lr": model_cfg.get("lr"),
-            "rfdetr_pretrain": model_cfg.get("pretrain_weights"),
+            "rfdetr_pretrain": str(rfdetr_pretrain),
             "rfdetr_grad_ckpt": model_cfg.get("gradient_checkpointing"),
             "rfdetr_extra": model_cfg.get("extra_train_kwargs"),
         }
