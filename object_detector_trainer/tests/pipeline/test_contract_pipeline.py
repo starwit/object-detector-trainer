@@ -198,7 +198,11 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
 
     write_params_yaml(workspace, common)
     if normalize_backend_name(model_cfg["backend"]) == "yolo":
-        create_local_yolo_checkpoint(workspace, checkpoint_path=str(model_cfg["checkpoint"]))
+        defaults = BASE_PARAMS.get("models_defaults", {})
+        yolo_defaults = defaults.get("yolo", {}) if isinstance(defaults, dict) else {}
+        cache_dir = Path(str(yolo_defaults.get("cache_dir", "models/pretrained/yolo")))
+        checkpoint_path = cache_dir / str(model_cfg["asset_id"])
+        create_local_yolo_checkpoint(workspace, checkpoint_path=str(checkpoint_path))
 
 
 def _patch_lightweight_trainers(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
@@ -253,6 +257,7 @@ def test_stage_contract_prepare_train_evaluate_all(
     _write_contract_params(contract_workspace, dataset_name="contract-all", model="yolov8n")
     args_all = _contract_args(dataset_name="contract-all", model="yolov8n")
     run_all_stages(args_all)
+    assert (contract_workspace / ".tmp" / "bootstrap_manifest.json").exists()
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
     _assert_summary_only_results(contract_workspace / "results_comparison")
 

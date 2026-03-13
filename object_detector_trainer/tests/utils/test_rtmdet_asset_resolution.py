@@ -22,5 +22,4 @@ def test_rtmdet_resolve_does_not_fallback_to_unrelated_checkpoint(tmp_path: Path
             checkpoint_path=None,
             config_name="rtmdet_m_8xb32-300e_coco",
             cache_dir=cache_dir,
-            allow_download=False,
         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import shutil
+from contextlib import suppress
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 import torch
 
+from object_detector_trainer.utils.path_ops import link_or_copy
 from object_detector_trainer.wrappers.rfdetr import RFDETRModelAdapter
 
 _BACKEND_NAMES = ("yolo", "rfdetr", "rtmdet")
@@ -18,7 +19,7 @@ _BACKEND_ALIASES = {
 }
 _REQUIRED_RESOLVED_FIELDS = {
     "yolo": ("checkpoint",),
-    "rfdetr": ("rfdetr_variant", "rfdetr_resolution", "rfdetr_batch_size", "rfdetr_pretrain"),
+    "rfdetr": ("rfdetr_variant", "rfdetr_resolution", "rfdetr_batch_size", "rfdetr_checkpoint"),
     "rtmdet": ("rtmdet_config_name", "rtmdet_cache_dir"),
 }
 
@@ -51,6 +52,55 @@ def resolve_workspace_path(raw_path: str | Path | None) -> Path | None:
     return candidate
 
 
+def _coerce_nonempty_str(value: object | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _default_cache_dir(backend: str) -> Path:
+    backend = normalize_backend_name(backend)
+    return Path.cwd() / "models" / "pretrained" / backend
+
+
+def _resolve_cache_dir(*, backend: str, model_cfg: Mapping[str, Any]) -> Path:
+    raw = _coerce_nonempty_str(model_cfg.get("cache_dir"))
+    return resolve_workspace_path(raw) or _default_cache_dir(backend)
+
+
+def _require_asset_id(*, model_key: str, model_cfg: Mapping[str, Any]) -> str:
+    asset_id = _coerce_nonempty_str(model_cfg.get("asset_id"))
+    if asset_id:
+        return asset_id
+    raise ValueError(f"models.{model_key} must define asset_id.")
+
+
+def _download_yolo_checkpoint(checkpoint_path: Path) -> Path:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from ultralytics.utils.downloads import attempt_download_asset
+    except (ImportError, ModuleNotFoundError) as e:
+        raise RuntimeError(
+            "YOLO checkpoint download requested but `ultralytics` is not installed."
+        ) from e
+    downloaded_path = Path(
+        attempt_download_asset(checkpoint_path.name, repo="ultralytics/assets", release="latest")
+    ).expanduser()
+    if not downloaded_path.is_absolute():
+        downloaded_path = Path.cwd() / downloaded_path
+    if not is_ready_file(downloaded_path):
+        raise FileNotFoundError(
+            f"Ultralytics reported a downloaded checkpoint, but no non-empty file exists at {downloaded_path}."
+        )
+    if downloaded_path.resolve() != checkpoint_path.resolve():
+        link_or_copy(downloaded_path, checkpoint_path, prefer_hardlink=False)
+    if not is_ready_file(checkpoint_path):
+        raise FileNotFoundError(f"YOLO checkpoint download did not create a usable file at {checkpoint_path}.")
+    if downloaded_path.resolve() != checkpoint_path.resolve() and downloaded_path.parent == Path.cwd():
+        with suppress(FileNotFoundError):
+            downloaded_path.unlink()
+    return checkpoint_path
+
+
 def is_ready_file(path: Path | None) -> bool:
     return path is not None and path.exists() and path.stat().st_size > 0
 
@@ -75,21 +125,17 @@ def resolve_backend_config(
     backend = normalize_backend_name(backend)
 
     if backend == "yolo":
-        checkpoint = str(model_cfg.get("checkpoint") or "").strip()
-        if not checkpoint:
-            raise ValueError(f"models.{model_key} (backend=yolo) must define checkpoint.")
-        resolved = {"checkpoint": checkpoint}
+        asset_id = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+        cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
+        checkpoint_path = cache_dir / asset_id
+        resolved = {"checkpoint": str(checkpoint_path)}
         if finetune_enabled and finetune_epochs is not None:
             resolved["epochs"] = int(finetune_epochs)
         return resolved
 
     if backend == "rtmdet":
-        config_name = model_cfg.get("config_name")
-        config_path = model_cfg.get("config_path")
-        if not config_name and not config_path:
-            raise ValueError(
-                f"models.{model_key} (backend=rtmdet) must define either config_name or config_path."
-            )
+        config_name = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+        cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
 
         batch_size = int(model_cfg.get("batch_size", shared_batch_size))
         explicit_grad_accum = model_cfg.get("grad_accum_steps")
@@ -104,11 +150,8 @@ def resolve_backend_config(
         lr = float(explicit_lr) if explicit_lr is not None else 0.004 * effective_bs / 256
 
         return {
-            "rtmdet_config_name": str(config_name) if config_name else None,
-            "rtmdet_config_path": str(config_path) if config_path else None,
-            "rtmdet_checkpoint": str(model_cfg["checkpoint"]) if model_cfg.get("checkpoint") else None,
-            "rtmdet_cache_dir": str(model_cfg.get("cache_dir", "models/pretrained/rtmdet")),
-            "rtmdet_allow_download": bool(model_cfg.get("allow_download", False)),
+            "rtmdet_config_name": str(config_name),
+            "rtmdet_cache_dir": str(cache_dir),
             "rtmdet_lr": lr,
             "rtmdet_accum": accum,
             "rtmdet_device": model_cfg.get("device"),
@@ -122,11 +165,9 @@ def resolve_backend_config(
         raise ValueError(
             f"models.{model_key} (backend=rfdetr) must define variant explicitly."
         )
-    pretrain_weights = model_cfg.get("pretrain_weights")
-    if not pretrain_weights:
-        raise ValueError(
-            f"models.{model_key} (backend=rfdetr) must define pretrain_weights."
-        )
+    asset_id = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
+    checkpoint_path = cache_dir / asset_id
 
     batch_size = int(model_cfg.get("batch_size", shared_batch_size))
     explicit_grad_accum = model_cfg.get("grad_accum_steps")
@@ -151,7 +192,7 @@ def resolve_backend_config(
         "rfdetr_target_effective_batch": target_effective_batch,
         "rfdetr_resolution": int(resolution),
         "rfdetr_lr": model_cfg.get("lr"),
-        "rfdetr_pretrain": str(pretrain_weights),
+        "rfdetr_checkpoint": str(checkpoint_path),
         "rfdetr_grad_ckpt": model_cfg.get("gradient_checkpointing"),
         "rfdetr_extra": model_cfg.get("extra_train_kwargs"),
     }
@@ -192,19 +233,13 @@ def build_reload_metadata(
         metadata["model_variant"] = str(model_variant)
 
     for key, attr_name, cfg_key in (
-        ("model_config_path", "model_config_path", "rtmdet_config_path"),
+        ("model_config_path", "model_config_path", "model_config_path"),
         ("rtmdet_config_name", "rtmdet_config_name", "rtmdet_config_name"),
         ("rtmdet_cache_dir", "rtmdet_cache_dir", "rtmdet_cache_dir"),
     ):
         value = getattr(model, attr_name, None) or resolved_cfg.get(cfg_key)
         if value:
             metadata[key] = str(value)
-
-    allow_download = getattr(model, "rtmdet_allow_download", None)
-    if allow_download is None:
-        allow_download = resolved_cfg.get("rtmdet_allow_download")
-    if allow_download is not None:
-        metadata["rtmdet_allow_download"] = bool(allow_download)
     return metadata
 
 
@@ -238,7 +273,7 @@ def load_backend_model_from_weights(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         rfdetr_model = core_rfdetr._get_rfdetr_model(
             model_variant=model_variant,
-            pretrain_weights=str(candidate_path),
+            checkpoint_path=str(candidate_path),
             device=device,
             resolution=int(resolution),
         )
@@ -262,50 +297,41 @@ def bootstrap_model_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path
     backend = normalize_backend_name(model_cfg.get("backend"))
 
     if backend == "yolo":
-        checkpoint = resolve_workspace_path(model_cfg.get("checkpoint"))
-        if checkpoint is None:
-            raise ValueError(f"models.{model_key} (backend=yolo) must define checkpoint.")
+        asset_id = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+        cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
+        checkpoint = cache_dir / asset_id
+
+        allow_download = bool(model_cfg.get("allow_download", True))
         if not is_ready_file(checkpoint):
-            _download_yolo_asset(checkpoint)
+            if not allow_download:
+                raise FileNotFoundError(
+                    f"models.{model_key} YOLO checkpoint is missing: {checkpoint}."
+                )
+            _download_yolo_checkpoint(checkpoint)
         return require_bootstrapped_file(checkpoint, label=f"models.{model_key}.checkpoint")
 
     if backend == "rtmdet":
         from object_detector_trainer.backends import rtmdet as core_rtmdet
 
-        config_name = str(model_cfg.get("config_name") or "").strip()
-        config_path = resolve_workspace_path(model_cfg.get("config_path"))
-        checkpoint_path = resolve_workspace_path(model_cfg.get("checkpoint"))
-        cache_dir = resolve_workspace_path(model_cfg.get("cache_dir")) or (
-            Path.cwd() / "models" / "pretrained" / "rtmdet"
-        )
-
-        if config_path is not None and not is_ready_file(config_path):
-            raise FileNotFoundError(
-                f"models.{model_key}.config_path is missing: {config_path}. "
-                "Bootstrap only supports config_name-based RTMDet downloads."
-            )
-        if checkpoint_path is not None and not is_ready_file(checkpoint_path):
-            raise FileNotFoundError(
-                f"models.{model_key}.checkpoint is missing: {checkpoint_path}. "
-                "Bootstrap only supports cache_dir/config_name-based RTMDet downloads."
-            )
+        config_name = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+        cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
+        allow_download = bool(model_cfg.get("allow_download", True))
 
         try:
             resolved_cfg, resolved_ckpt, _ = core_rtmdet._resolve_rtmdet_assets(
-                config_path=config_path,
-                checkpoint_path=checkpoint_path,
-                config_name=config_name or None,
+                config_path=None,
+                checkpoint_path=None,
+                config_name=str(config_name),
                 cache_dir=cache_dir,
-                allow_download=False,
             )
             if is_ready_file(resolved_cfg) and is_ready_file(resolved_ckpt):
                 return resolved_cfg
         except FileNotFoundError:
             pass
 
-        if not config_name:
-            raise ValueError(
-                f"models.{model_key} (backend=rtmdet) must define config_name for bootstrap."
+        if not allow_download:
+            raise FileNotFoundError(
+                f"models.{model_key} RTMDet assets are missing under {cache_dir} for config '{config_name}'. "
             )
 
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -315,34 +341,37 @@ def bootstrap_model_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path
             check=True,
         )
         resolved_cfg, resolved_ckpt, _ = core_rtmdet._resolve_rtmdet_assets(
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            config_name=config_name,
+            config_path=None,
+            checkpoint_path=None,
+            config_name=str(config_name),
             cache_dir=cache_dir,
-            allow_download=False,
         )
         require_bootstrapped_file(resolved_cfg, label=f"models.{model_key}.config")
         require_bootstrapped_file(resolved_ckpt, label=f"models.{model_key}.checkpoint")
         return resolved_cfg
 
-    pretrain_weights = resolve_workspace_path(model_cfg.get("pretrain_weights"))
-    if pretrain_weights is None:
-        raise ValueError(
-            f"models.{model_key} (backend=rfdetr) must define pretrain_weights."
-        )
-    if not is_ready_file(pretrain_weights):
+    asset_id = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    cache_dir = _resolve_cache_dir(backend=backend, model_cfg=model_cfg)
+    checkpoint_path = cache_dir / asset_id
+
+    allow_download = bool(model_cfg.get("allow_download", True))
+    if not is_ready_file(checkpoint_path):
+        if not allow_download:
+            raise FileNotFoundError(
+                f"models.{model_key} RF-DETR checkpoint is missing: {checkpoint_path}."
+            )
         from rfdetr.main import HOSTED_MODELS
         from rfdetr.util.files import download_file
 
-        url = HOSTED_MODELS.get(pretrain_weights.name)
+        url = HOSTED_MODELS.get(checkpoint_path.name)
         if not url:
             raise ValueError(
-                f"Unsupported RF-DETR pretrained asset for bootstrap: {pretrain_weights.name}. "
+                f"Unsupported RF-DETR asset for bootstrap: {checkpoint_path.name}. "
                 "Use a hosted RF-DETR checkpoint name or provision it manually."
             )
-        pretrain_weights.parent.mkdir(parents=True, exist_ok=True)
-        download_file(url, str(pretrain_weights))
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        download_file(url, str(checkpoint_path))
     return require_bootstrapped_file(
-        pretrain_weights,
-        label=f"models.{model_key}.pretrain_weights",
+        checkpoint_path,
+        label=f"models.{model_key}.checkpoint",
     )

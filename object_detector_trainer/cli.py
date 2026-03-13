@@ -83,6 +83,9 @@ def _set_deterministic_seed(seed: int, backend_hint: str) -> None:
 
 def run_all_stages(args, config=None) -> None:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
+    resolved = resolve_training_config(args, cfg)
+    _set_deterministic_seed(getattr(args, "seed", 42), resolved["backend"])
+    run_bootstrap_stage(args, config=cfg)
     run_prepare_stage(args, config=cfg)
     train_result = run_train_stage(args, config=cfg)
     run_evaluate_stage(args, train_result=train_result, config=cfg)
@@ -123,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolved = resolve_training_config(args, cfg)
         backend_hint = resolved["backend"]
 
-    if args.stage != "bootstrap":
+    if args.stage not in {"bootstrap", "all"}:
         _set_deterministic_seed(args.seed, backend_hint)
 
     if args.stage == "bootstrap":
@@ -135,7 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.stage == "evaluate":
         run_evaluate_stage(args)
     else:
-        run_all_stages(args)
+        run_all_stages(args, config=cfg)
     return 0
 
 

@@ -153,7 +153,6 @@ class RTMDetModelAdapter:
         model_config_path: str | None = None,
         config_name: str | None = None,
         cache_dir: str | None = None,
-        allow_download: bool | None = None,
         infer_fn=None,
     ):
         self._model = model
@@ -167,7 +166,6 @@ class RTMDetModelAdapter:
         self.model_config_path = model_config_path
         self.rtmdet_config_name = config_name
         self.rtmdet_cache_dir = cache_dir
-        self.rtmdet_allow_download = allow_download
         self.model = type("_Stub", (), {"yaml": {"model_name": model_name}})()
         self.trainer = None
 

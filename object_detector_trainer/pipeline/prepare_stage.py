@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import random
 from pathlib import Path
+
+import numpy as np
 
 from object_detector_trainer.config.loader import load_config
 from object_detector_trainer.dataprep.find_duplicates import DuplicateDetector
@@ -14,8 +17,19 @@ from object_detector_trainer.dataprep.source_ingest import (
 logger = logging.getLogger(__name__)
 
 
+def _seed_prepare_stage(args) -> None:
+    raw_seed = getattr(args, "seed", None)
+    if raw_seed is None:
+        return
+
+    seed = int(raw_seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 def run_prepare_stage(args, config=None) -> Path:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
+    _seed_prepare_stage(args)
 
     dataset_name = Path(getattr(args, "dataset_name", None) or cfg.data.dataset_name)
     raw_val_split = getattr(args, "val_split", None)

@@ -24,7 +24,7 @@ def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
     RF-DETR tries to copy it into checkpoint_best_total.pth.
 
     We patch rfdetr.main.BestMetricHolder for the duration of training so the
-    first evaluation is always treated as "best" (init_res < 0.0). This is not a
+    first evaluation is always treated as "best" (init_res = -inf). This is not a
     fallback to a different model; it makes the canonical output artifact
     deterministic and prevents silent substitution.
     """
@@ -47,19 +47,19 @@ def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
             rfdetr_main.BestMetricHolder = original_symbol  # type: ignore[assignment]
 
 
-def _resolve_required_pretrain_weights(path_like: str | Path | None) -> Path:
+def _resolve_required_checkpoint(path_like: str | Path | None) -> Path:
     if not path_like:
         raise ValueError(
-            "RF-DETR models must define models.<key>.pretrain_weights explicitly. "
-            "Automatic downloads are not allowed."
+            "RF-DETR training requires a resolved local checkpoint path. "
+            "Run bootstrap first or check models.<key>.asset_id / cache_dir."
         )
     candidate = Path(path_like).expanduser()
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     if not candidate.exists():
-        raise FileNotFoundError(f"models.<key>.pretrain_weights does not exist: {candidate}")
+        raise FileNotFoundError(f"Resolved RF-DETR checkpoint does not exist: {candidate}")
     if candidate.stat().st_size == 0:
-        raise FileNotFoundError(f"models.<key>.pretrain_weights is empty: {candidate}")
+        raise FileNotFoundError(f"Resolved RF-DETR checkpoint is empty: {candidate}")
     return candidate
 
 
@@ -96,7 +96,7 @@ def _normalize_rfdetr_resolution(model_variant: str, resolution: int | None, fal
 
 def _get_rfdetr_model(
     model_variant: str,
-    pretrain_weights: str | None = None,
+    checkpoint_path: str | None = None,
     device: str | None = None,
     resolution: int | None = None,
     gradient_checkpointing: bool | None = None,
@@ -124,8 +124,8 @@ def _get_rfdetr_model(
         )
 
     init_kwargs: dict[str, object] = {}
-    if pretrain_weights:
-        init_kwargs["pretrain_weights"] = pretrain_weights
+    if checkpoint_path:
+        init_kwargs["pretrain_weights"] = checkpoint_path
     if device:
         init_kwargs["device"] = device
     if resolution is not None:
@@ -145,7 +145,7 @@ def train_rfdetr(
     grad_accum_steps: int,
     lr: float | None,
     resolution: int,
-    pretrain_weights: str | None = None,
+    checkpoint_path: str | None = None,
     gradient_checkpointing: bool | None = None,
     extra_train_kwargs: dict | None = None,
 ):
@@ -160,11 +160,11 @@ def train_rfdetr(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    pretrain_path = _resolve_required_pretrain_weights(pretrain_weights)
+    checkpoint = _resolve_required_checkpoint(checkpoint_path)
 
     model = _get_rfdetr_model(
         model_variant,
-        pretrain_weights=str(pretrain_path),
+        checkpoint_path=str(checkpoint),
         device=device,
         resolution=resolution,
         gradient_checkpointing=gradient_checkpointing,
@@ -185,7 +185,7 @@ def train_rfdetr(
     if extra_train_kwargs:
         train_kwargs.update(extra_train_kwargs)
 
-    with _patched_rfdetr_best_metric_holder(init_res=-1.0):
+    with _patched_rfdetr_best_metric_holder(init_res=float("-inf")):
         model.train(**train_kwargs)
     return model, output_dir
 
@@ -284,7 +284,7 @@ def train_rfdetr_backend(
 
     rfdetr_lr = resolved_cfg.get("rfdetr_lr")
     rfdetr_resolution = int(resolved_cfg["rfdetr_resolution"])
-    rfdetr_pretrain = resolved_cfg.get("rfdetr_pretrain")
+    rfdetr_checkpoint = resolved_cfg.get("rfdetr_checkpoint")
     rfdetr_grad_ckpt = resolved_cfg.get("rfdetr_grad_ckpt")
     rfdetr_extra = resolved_cfg.get("rfdetr_extra")
 
@@ -311,7 +311,7 @@ def train_rfdetr_backend(
         grad_accum_steps=rfdetr_grad_accum,
         lr=float(rfdetr_lr) if rfdetr_lr is not None else None,
         resolution=rfdetr_resolution,
-        pretrain_weights=str(rfdetr_pretrain) if rfdetr_pretrain is not None else None,
+        checkpoint_path=str(rfdetr_checkpoint) if rfdetr_checkpoint is not None else None,
         gradient_checkpointing=rfdetr_grad_ckpt,
         extra_train_kwargs=rfdetr_extra if isinstance(rfdetr_extra, dict) else None,
     )
