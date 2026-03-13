@@ -151,8 +151,7 @@ def _write_backend_contract_params(
     if "cache_dir" in model_cfg:
         cache_dir = workspace / "models" / "pretrained" / backend
         model_cfg["cache_dir"] = str(cache_dir)
-    if "allow_download" in model_cfg:
-        model_cfg["allow_download"] = False
+    # Heavy contract tests are allowed to fetch missing pretrained assets.
 
     yolo_checkpoint = _ensure_yolo_checkpoint(workspace)
     if backend == "yolo":
