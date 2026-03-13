@@ -79,9 +79,6 @@ def evaluate_and_log_model_results(
     rtmdet_cache_dir = getattr(model, "rtmdet_cache_dir", None)
     if rtmdet_cache_dir:
         metadata["rtmdet_cache_dir"] = str(rtmdet_cache_dir)
-    rtmdet_allow_download = getattr(model, "rtmdet_allow_download", None)
-    if rtmdet_allow_download is not None:
-        metadata["rtmdet_allow_download"] = bool(rtmdet_allow_download)
     class_names_meta = getattr(model, "class_names", None)
     if isinstance(class_names_meta, dict) and class_names_meta:
         metadata["class_names"] = {int(k): str(v) for k, v in class_names_meta.items()}

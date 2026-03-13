@@ -222,7 +222,7 @@ def test_pipeline_requires_local_model_checkpoint(stubbed_pipeline: StubYOLO):
             "models": {
                 "yolov8n": {
                     "backend": "yolo",
-                    "checkpoint": "models/pretrained/yolo/missing.pt",
+                    "asset_id": "missing.pt",
                 }
             },
             "evaluation": {"baseline_weights_path": str(baseline_path)},

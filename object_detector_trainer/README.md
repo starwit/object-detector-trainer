@@ -47,10 +47,14 @@ The pipeline is split into three explicit lifecycle stages:
 Run the stages via the core CLI:
 
 ```bash
+python -m object_detector_trainer.cli --stage bootstrap --model <model-key>
 python -m object_detector_trainer.cli --stage prepare --dataset-name <name>
 python -m object_detector_trainer.cli --stage train --dataset-name <name> --model <model-key>
 python -m object_detector_trainer.cli --stage evaluate --dataset-name <name> --model <model-key>
+python -m object_detector_trainer.cli --stage all --dataset-name <name> --model <model-key>
 ```
+
+`--stage all` runs bootstrap, prepare, train, and evaluate in order.
 
 ### Typical project wrapper (`train.py`)
 
@@ -160,17 +164,15 @@ train:
 models:
   yolo11m:
     backend: yolo
-    checkpoint: yolo11m.pt
+    asset_id: yolo11m.pt
   rfdetr-medium:
     backend: rfdetr
     variant: medium
-    pretrain_weights: models/pretrained/rfdetr/rf-detr-medium.pth
+    asset_id: rf-detr-medium.pth
     resolution: 1280
   rtmdet-m:
     backend: rtmdet
-    config_name: rtmdet_m_8xb32-300e_coco
-    cache_dir: models/pretrained/rtmdet
-    allow_download: false
+    asset_id: rtmdet_m_8xb32-300e_coco
 
 evaluation:
   baseline_weights_path: models/current_best/best.pt
@@ -183,31 +185,36 @@ evaluation:
 
 ### Baseline & fine-tune weights
 
-- `evaluation.baseline_weights_path` is required at evaluation time and must point to an existing, non-empty weights file with metadata that defines `model_backend`.
+- `evaluation.baseline_weights_path` is optional. If no `metadata.yaml` exists next to that path yet, evaluation runs on the trained model only (no baseline comparisons). If `metadata.yaml` exists, the weights file must also exist and be non-empty (otherwise evaluation fails loudly and you need to fetch/export the baseline).
 - Fine-tuning weights (`train.finetune.weights`) are required when `train.finetune.enabled: true` and must be a non-empty file.
-- Use `python -m train --stage bootstrap` to fetch the current baseline plus the selected model assets explicitly.
-- Use `python -m train --stage bootstrap --all-models` to prefetch every configured model for backend-heavy testing or CI.
+- Bootstrap provisions model assets only. Promoted baselines remain an explicit fetch/export step.
+- In a consumer project, use the project wrapper or `python -m object_detector_trainer.cli --stage bootstrap --config <params.yaml>` to prefetch model assets explicitly.
+- In this repo, use `python scripts/provision_heavy_test_assets.py` to prefetch the local asset cache required by backend-heavy tests.
 
 ## Backends
 
 ### Ultralytics YOLO (`backend: yolo`)
 
 - Uses `ultralytics.YOLO`.
-- `models.<key>.checkpoint` must point to a local, non-empty `.pt` file.
+- `models.<key>.asset_id` is the pretrained checkpoint filename (e.g. `yolo11m.pt`).
+- The checkpoint is expected at `models_defaults.yolo.cache_dir / asset_id` after bootstrap.
 - Fine-tuning is supported via `train.finetune.*`.
 
 ### RF-DETR (`backend: rfdetr`)
 
 - Uses the `rfdetr` Python package.
-- `rfdetr` is a standard project dependency (installed via Poetry with the rest of the repo).
-- `models.<key>.pretrain_weights` is required and must point to a local, non-empty checkpoint file.
+- `rfdetr` is a standard project dependency.
+- `models.<key>.asset_id` is the pretrained checkpoint filename (e.g. `rf-detr-medium.pth`).
+- The checkpoint is expected at `models_defaults.rfdetr.cache_dir / asset_id` after bootstrap.
 - The backend trains via RF-DETR’s Roboflow dataset loader; the pipeline creates a tiny bridge layout under `.tmp/` and cleans it up after training.
 - RF-DETR resolution has divisibility constraints; the pipeline will auto-adjust and print a warning if needed.
 
 ### RTMDet / MMDetection (`backend: rtmdet`)
 
 - Requires `mmdet`, `mmengine`, and **full `mmcv` ops** (`mmcv`, not `mmcv-lite`).
-- Configs/checkpoints must already exist locally in the configured cache/path; the pipeline does not auto-download them during runs.
+- `models.<key>.asset_id` is the MMDetection config name (e.g. `rtmdet_m_8xb32-300e_coco`).
+- Config/checkpoint files are expected under `models_defaults.rtmdet.cache_dir` after bootstrap.
+- Training/evaluation runs do not auto-download RTMDet assets; bootstrap is the explicit provisioning step.
 - Uses a temporary COCO export under `.tmp/` for training and evaluation.
 - You can predownload configs/checkpoints for reproducible offline runs:
 
@@ -324,12 +331,15 @@ Notes:
 This repo includes:
 
 - Unit tests + E2E pipeline smoke tests using stubs (fast, default)
-- Opt-in heavy integration tests (real backend training)
+- Opt-in heavy integration tests (real backend training, requires preprovisioned local assets)
 
 Run:
 
 ```bash
-poetry install --with dev
-poetry run pytest -q
-poetry run pytest -q --heavy
+python -m pip install -e ".[dev,rtmdet]"
+python -m pytest -q
+python scripts/provision_heavy_test_assets.py
+python -m pytest object_detector_trainer/tests -q --heavy
 ```
+
+`pytest -m heavy` is not a valid substitute. The test suite requires the explicit `--heavy` flag and fails fast if the local heavy-test asset cache is missing.

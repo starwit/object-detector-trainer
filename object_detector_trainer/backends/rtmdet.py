@@ -188,7 +188,6 @@ def _resolve_rtmdet_assets(
     checkpoint_path: str | Path | None,
     config_name: str | None,
     cache_dir: str | Path | None,
-    allow_download: bool,
 ) -> tuple[Path, Path | None, str]:
     cfg_path = _resolve_path(config_path)
     ckpt_path = _resolve_path(checkpoint_path)
@@ -210,15 +209,10 @@ def _resolve_rtmdet_assets(
         else:
             matches = sorted(cache_root.glob(f"**/{variant}.py"))
             if not matches:
-                download_note = (
-                    ""
-                    if allow_download
-                    else " Automatic downloads are disabled; pre-download the assets locally."
-                )
                 raise FileNotFoundError(
                     f"Could not find config '{variant}.py' under {cache_root}. "
-                    "Use `mim download mmdet --config <name> --dest <cache_dir>` "
-                    f"or set models.<key>.config_path.{download_note}"
+                    "Run the bootstrap stage (or `mim download mmdet --config <name> --dest <cache_dir>`) "
+                    "to provision pretrained RTMDet assets."
                 )
             cfg_path = matches[-1]
 
@@ -231,15 +225,10 @@ def _resolve_rtmdet_assets(
 
         candidates = sorted(cache_root.glob(f"**/{variant}*.pth"))
         if not candidates:
-            download_note = (
-                ""
-                if allow_download
-                else " Automatic downloads are disabled; provision the assets locally first."
-            )
             raise FileNotFoundError(
                 f"Could not find checkpoint '{variant}*.pth' under {cache_root}. "
-                "Use `mim download mmdet --config <name> --dest <cache_dir>` "
-                f"or set models.<key>.checkpoint_path.{download_note}"
+                "Run the bootstrap stage (or `mim download mmdet --config <name> --dest <cache_dir>`) "
+                "to provision pretrained RTMDet assets."
             )
         ckpt_path = max(candidates, key=lambda p: p.stat().st_mtime)
 
@@ -395,7 +384,6 @@ def load_rtmdet_baseline(
                 checkpoint_path=None,
                 config_name=str(config_name),
                 cache_dir=metadata.get("rtmdet_cache_dir"),
-                allow_download=bool(metadata.get("rtmdet_allow_download", False)),
             )
 
     try:
@@ -460,18 +448,11 @@ def train_rtmdet_backend(
     classes_tuple = tuple(class_names[i] for i in sorted(class_names))
 
     cfg_path, ckpt_path, variant = _resolve_rtmdet_assets(
-        config_path=resolved_cfg.get("rtmdet_config_path"),
-        checkpoint_path=resolved_cfg.get("rtmdet_checkpoint"),
+        config_path=None,
+        checkpoint_path=None,
         config_name=resolved_cfg.get("rtmdet_config_name"),
         cache_dir=resolved_cfg.get("rtmdet_cache_dir"),
-        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", False)),
     )
-    if ckpt_path is None:
-        raise FileNotFoundError(
-            "RTMDet requires a local pretrained checkpoint for training. "
-            f"No checkpoint was found for config '{variant}' under "
-            f"{resolved_cfg.get('rtmdet_cache_dir') or 'models/pretrained/rtmdet'}."
-        )
 
     run_name = experiment_name or f"{resolved_cfg['model_key']}-rtmdet"
     runs_root = Path("runs")
@@ -632,7 +613,6 @@ def train_rtmdet_backend(
         model_config_path=str(local_config),
         config_name=variant,
         cache_dir=str(resolved_cfg.get("rtmdet_cache_dir") or "models/pretrained/rtmdet"),
-        allow_download=bool(resolved_cfg.get("rtmdet_allow_download", False)),
     )
 
     if bool(resolved_cfg.get("rtmdet_cleanup_tmp", False)):

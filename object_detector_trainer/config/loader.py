@@ -13,6 +13,54 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)  # type: ignore[arg-type]
+        else:
+            merged[key] = value
+    return merged
+
+
+def _normalize_backend_key(value: Any) -> str:
+    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+
+
+def _apply_models_defaults(raw_config: dict[str, Any]) -> dict[str, Any]:
+    defaults_by_backend = _as_mapping(raw_config.get("models_defaults"))
+    if not defaults_by_backend:
+        return raw_config
+
+    models_cfg = raw_config.get("models")
+    if not isinstance(models_cfg, dict) or not models_cfg:
+        return raw_config
+
+    global_defaults = _as_mapping(defaults_by_backend.get("*"))
+
+    merged_models: dict[str, Any] = {}
+    for model_key, model_cfg_raw in models_cfg.items():
+        if not isinstance(model_cfg_raw, dict):
+            merged_models[str(model_key)] = model_cfg_raw
+            continue
+
+        backend_raw = model_cfg_raw.get("backend")
+        if backend_raw is None:
+            merged_models[str(model_key)] = model_cfg_raw
+            continue
+
+        backend_key = _normalize_backend_key(backend_raw)
+        backend_defaults = _as_mapping(defaults_by_backend.get(backend_key))
+        combined_defaults = _deep_merge(global_defaults, backend_defaults) if global_defaults else backend_defaults
+        merged_models[str(model_key)] = (
+            _deep_merge(combined_defaults, model_cfg_raw) if combined_defaults else model_cfg_raw
+        )
+
+    merged = dict(raw_config)
+    merged["models"] = merged_models
+    return merged
+
+
 def _apply_direct_arg_overrides(raw_config: dict[str, Any], args) -> dict[str, Any]:
     merged = dict(raw_config)
     data_cfg = dict(_as_mapping(merged.get("data", {})))
@@ -54,10 +102,9 @@ def load_config(config_path: str | Path = "params.yaml", args=None) -> AppConfig
     if not isinstance(raw, dict):
         raise ValueError(f"Configuration root must be a mapping in {cfg_path}")
 
-    merged: dict[str, Any] = dict(raw)
+    merged: dict[str, Any] = _apply_models_defaults(dict(raw))
     if args is not None:
         merged = _apply_direct_arg_overrides(merged, args)
         merged = apply_set_overrides(merged, getattr(args, "set", None))
 
     return AppConfig.model_validate(merged)
-

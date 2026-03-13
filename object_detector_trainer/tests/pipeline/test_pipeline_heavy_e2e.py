@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from object_detector_trainer.backends.registry import (
-    bootstrap_model_assets,
     normalize_backend_name,
     supported_backend_names,
 )
@@ -21,9 +20,11 @@ from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
 from object_detector_trainer.tests.support.pipeline_test_utils import (
     BASE_PARAMS,
+    copy_preprovisioned_model_assets,
     build_args,
     create_baseline_artifact,
     create_minimal_dataset,
+    repo_root,
     write_params_yaml,
 )
 
@@ -68,20 +69,31 @@ BACKEND_CASES = _discover_backend_cases()
 if not BACKEND_CASES:
     raise RuntimeError("Heavy backend contract setup failed: no backend cases discovered from BASE_PARAMS.")
 
-def _ensure_yolo_checkpoint(workspace: Path) -> Path:
-    """Ensure we have a real YOLO checkpoint for baseline/model loading in heavy tests."""
+def _provisioning_command() -> str:
+    return f"python {repo_root() / 'scripts' / 'provision_heavy_test_assets.py'}"
 
-    checkpoint = workspace / "models" / "pretrained" / "yolo" / "yolov8n.pt"
-    if checkpoint.exists() and checkpoint.stat().st_size > 0:
-        return checkpoint
 
-    bootstrap_model_assets(
-        "yolov8n",
-        {"backend": "yolo", "checkpoint": str(checkpoint)},
-    )
-    if not checkpoint.exists() or checkpoint.stat().st_size == 0:
-        pytest.fail(f"Failed to download required YOLO checkpoint: {checkpoint}")
-    return checkpoint
+def _copy_preprovisioned_assets(workspace: Path, *, model_key: str, model_cfg: dict[str, object]) -> Path:
+    try:
+        copied_yolo = copy_preprovisioned_model_assets(
+            source_workspace=repo_root(),
+            destination_workspace=workspace,
+            model_key="yolov8n",
+            model_cfg={"backend": "yolo", "asset_id": "yolov8n.pt"},
+        )
+        copy_preprovisioned_model_assets(
+            source_workspace=repo_root(),
+            destination_workspace=workspace,
+            model_key=model_key,
+            model_cfg=model_cfg,
+        )
+    except FileNotFoundError as exc:
+        pytest.fail(
+            "Heavy backend assets are not provisioned locally. "
+            f"Run `{_provisioning_command()}` first. Details: {exc}"
+        )
+
+    return copied_yolo[0]
 
 
 def _assert_metrics_contract(workspace: Path) -> None:
@@ -121,6 +133,20 @@ def _assert_run_contract(run_dir: Path) -> None:
     assert (run_dir / "side_by_side_comparisons").is_dir(), "Run must contain side_by_side_comparisons/"
 
 
+def _assert_background_only_sample(dataset_root: Path) -> None:
+    label_dir = dataset_root / "train" / "train" / "labels"
+    empty_labels = [path for path in label_dir.glob("*.txt") if path.stat().st_size == 0]
+    assert empty_labels, "Heavy dataset contract must include at least one empty-label training sample."
+
+
+def _assert_validation_labels_present(dataset_root: Path) -> None:
+    label_dir = dataset_root / "train" / "val" / "labels"
+    label_files = sorted(label_dir.glob("*.txt"))
+    assert label_files, "Heavy dataset contract must keep at least one labeled validation sample."
+    empty_labels = [path for path in label_files if path.stat().st_size == 0]
+    assert not empty_labels, "Heavy dataset validation split must not contain empty-label samples."
+
+
 def _write_backend_contract_params(
     workspace: Path,
     *,
@@ -137,6 +163,7 @@ def _write_backend_contract_params(
 
     model_cfg: dict[str, object] = copy.deepcopy(source_cfg)
     model_cfg["backend"] = backend
+    model_cfg["allow_download"] = False
     for key, value in (
         ("epochs", 1),
         ("batch_size", 1),
@@ -147,15 +174,12 @@ def _write_backend_contract_params(
         if key in model_cfg:
             model_cfg[key] = value
 
-    cache_dir: Path | None = None
-    if "cache_dir" in model_cfg:
-        cache_dir = workspace / "models" / "pretrained" / backend
-        model_cfg["cache_dir"] = str(cache_dir)
-    # Heavy contract tests are allowed to fetch missing pretrained assets.
-
-    yolo_checkpoint = _ensure_yolo_checkpoint(workspace)
-    if backend == "yolo":
-        model_cfg["checkpoint"] = str(yolo_checkpoint)
+    cache_dir = workspace / "models" / "pretrained" / backend
+    yolo_checkpoint = _copy_preprovisioned_assets(
+        workspace,
+        model_key=model_key,
+        model_cfg=model_cfg,
+    )
 
     baseline_path = create_baseline_artifact(
         workspace,
@@ -203,16 +227,18 @@ def test_heavy_backend_contract_one_epoch(
     monkeypatch.chdir(tmp_path)
     dataset_name = f"heavy-contract-{backend}"
 
-    create_minimal_dataset(tmp_path)
+    create_minimal_dataset(tmp_path, include_empty_train_sample=True)
     backend_cache_dir = _write_backend_contract_params(
         tmp_path,
         dataset_name=dataset_name,
         backend=backend,
         model_key=model_key,
     )
-    args = build_args(dataset_name, {"model": model_key})
+    args = build_args(dataset_name, {"model": model_key, "val_split": 0.25})
     run_bootstrap_stage(args)
-    run_prepare_stage(args)
+    dataset_path = run_prepare_stage(args)
+    _assert_background_only_sample(dataset_path)
+    _assert_validation_labels_present(dataset_path)
 
     train_result = run_train_stage(args)
     run_evaluate_stage(args, train_result=train_result)

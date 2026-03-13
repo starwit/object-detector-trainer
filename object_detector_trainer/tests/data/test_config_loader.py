@@ -25,10 +25,16 @@ def _write_minimal_config(path: Path) -> None:
         "train": {
             "model": "rtmdet-tiny",
         },
+        "models_defaults": {
+            "rtmdet": {
+                "cache_dir": "models/pretrained/rtmdet",
+                "allow_download": False,
+            }
+        },
         "models": {
             "rtmdet-tiny": {
                 "backend": "rtmdet",
-                "config_name": "rtmdet_tiny_8xb32-300e_coco",
+                "asset_id": "rtmdet_tiny_8xb32-300e_coco",
             }
         },
     }
@@ -67,7 +73,7 @@ def test_resolve_training_config_requires_explicit_rfdetr_variant(tmp_path: Path
         "models": {
             "rfdetr-nano": {
                 "backend": "rfdetr",
-                "pretrain_weights": "models/pretrained/rfdetr/rf-detr-nano.pth",
+                "asset_id": "rf-detr-nano.pth",
             }
         },
     }
@@ -97,5 +103,5 @@ def test_resolve_training_config_does_not_accept_rtmdet_variant_alias(tmp_path: 
     params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     cfg = load_config(params_path)
 
-    with pytest.raises(ValueError, match="must define either config_name or config_path"):
+    with pytest.raises(ValueError, match="must define asset_id"):
         resolve_training_config(SimpleNamespace(seed=42, model=None), cfg)

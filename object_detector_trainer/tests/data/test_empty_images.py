@@ -1,13 +1,5 @@
-"""Tests for handling empty/missing labels and minimal training run.
+"""Tests for handling empty/missing labels during data preparation."""
 
-This suite checks two things:
-- Data prep creates empty label files when labels are missing or empty and
-  ensures every image has a corresponding label file with correct counts.
-- A minimal `train_model` run succeeds even when the training set contains
-  a background-only (empty-label) sample.
-"""
-
-import shutil
 from pathlib import Path
 
 import cv2
@@ -16,8 +8,6 @@ import pytest
 from typing import NamedTuple
 
 from object_detector_trainer.dataprep.dataset_builder import process_single_images
-from object_detector_trainer.dataprep.dataset_yaml import create_dataset_yaml
-from object_detector_trainer.backends.yolo import train_model
 
 
 class SourceDataset(NamedTuple):
@@ -116,60 +106,3 @@ def test_process_single_images(tmp_path: Path, source_dataset: SourceDataset):
             assert content == "", f"Label for {image_file.name} should be empty"
         else:
             assert content != "", f"Label for {image_file.name} should not be empty"
-
-
-def test_train_model_minimal(tmp_path: Path, source_dataset: SourceDataset):
-    """Minimal training run including a background-only (empty-label) sample.
-
-    Smoke-checks that `train_model` runs without error and produces outputs.
-    """
-    _, images_dir, labels_dir = source_dataset
-
-    # Create the dataset directory that will be used for training
-    dataset_dir = tmp_path / "datasets" / "test_dataset"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create the required directory structure for YOLO training
-    (dataset_dir / "train" / "images").mkdir(parents=True, exist_ok=True)
-    (dataset_dir / "train" / "labels").mkdir(parents=True, exist_ok=True)
-    (dataset_dir / "val" / "images").mkdir(parents=True, exist_ok=True)
-    (dataset_dir / "val" / "labels").mkdir(parents=True, exist_ok=True)
-
-    # Create a proper dataset YAML using the utility function
-    create_dataset_yaml(dataset_dir)
-
-    # First populate the dataset directory with some sample data
-    # Copy a few images and labels to the train and val directories
-    src_img = images_dir / "image1.jpg"
-    src_label = labels_dir / "image1.txt"
-
-    # Add one image with objects to train
-    shutil.copy(src_img, dataset_dir / "train" / "images" / "image1.jpg")
-    shutil.copy(src_label, dataset_dir / "train" / "labels" / "image1.txt")
-
-    # Add one image without objects to train
-    empty_img = images_dir / "image2.jpg"
-    shutil.copy(empty_img, dataset_dir / "train" / "images" / "image2.jpg")
-    # Create empty label file
-    with open(dataset_dir / "train" / "labels" / "image2.txt", "w") as f:
-        pass
-
-    # Add an image to validation set as well
-    shutil.copy(src_img, dataset_dir / "val" / "images" / "image1.jpg")
-    shutil.copy(src_label, dataset_dir / "val" / "labels" / "image1.txt")
-
-    checkpoint_path = Path(__file__).resolve().parents[3] / "yolov8n.pt"
-    if not checkpoint_path.exists():
-        pytest.fail(f"Local YOLO checkpoint not found: {checkpoint_path}")
-
-    # Try a minimal training run
-    model, results, train_output_dir = train_model(
-        dataset_path=dataset_dir,
-        checkpoint=str(checkpoint_path),
-        image_size=320,  # Use small image size for faster test
-        batch_size=1,
-        experiment_name="test_experiment",
-        epochs=1,
-    )
-    # If we get here, the training ran without error
-    assert train_output_dir.exists()

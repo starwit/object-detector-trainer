@@ -279,7 +279,7 @@ def _resolve_optional_baseline_model(
         if baseline_promoted:
             raise FileNotFoundError(
                 "Promoted baseline metadata exists, but the baseline weights file is missing/empty at "
-                f"{candidate}. Fetch the baseline (e.g. `dvc pull {candidate}` or run the bootstrap stage)."
+                f"{candidate}. Fetch the baseline explicitly (for example `dvc pull {candidate}`)."
             )
         logger.warning(
             "No promoted baseline present yet at %s; skipping baseline comparison.",

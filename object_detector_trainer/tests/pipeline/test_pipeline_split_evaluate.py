@@ -68,7 +68,6 @@ class _StubEvalModel:
         model_config_path: str | None = None,
         rtmdet_config_name: str | None = None,
         rtmdet_cache_dir: str | None = None,
-        rtmdet_allow_download: bool | None = None,
     ) -> None:
         self.model_name = model_name
         self.model_backend = model_backend
@@ -80,7 +79,6 @@ class _StubEvalModel:
         self.model_config_path = model_config_path
         self.rtmdet_config_name = rtmdet_config_name
         self.rtmdet_cache_dir = rtmdet_cache_dir
-        self.rtmdet_allow_download = rtmdet_allow_download
 
     def val(self, **kwargs):
         return _StubValMetrics()
@@ -170,7 +168,7 @@ def _patch_rfdetr_train(monkeypatch: pytest.MonkeyPatch) -> Path:
 def _patch_rfdetr_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, str]]) -> None:
     def _fake_get_rfdetr_model(
         model_variant,
-        pretrain_weights=None,
+        checkpoint_path=None,
         device=None,
         resolution=None,
         gradient_checkpointing=None,
@@ -178,7 +176,7 @@ def _patch_rfdetr_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, 
         calls.append(
             {
                 "variant": str(model_variant),
-                "weights": str(pretrain_weights),
+                "weights": str(checkpoint_path),
                 "resolution": str(resolution),
             }
         )
@@ -210,7 +208,6 @@ def _patch_rtmdet_train(monkeypatch: pytest.MonkeyPatch) -> Path:
             model_config_path=str(model_config),
             rtmdet_config_name="rtmdet_tiny_8xb32-300e_coco",
             rtmdet_cache_dir="models/pretrained/rtmdet",
-            rtmdet_allow_download=False,
         )
         return model, run_dir, "rtmdet-split", 320, 1
 
@@ -236,7 +233,6 @@ def _patch_rtmdet_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, 
             model_config_path=str(metadata.get("model_config_path", "")),
             rtmdet_config_name=str(metadata.get("rtmdet_config_name", "")),
             rtmdet_cache_dir=str(metadata.get("rtmdet_cache_dir", "")),
-            rtmdet_allow_download=bool(metadata.get("rtmdet_allow_download", False)),
         )
 
     monkeypatch.setattr("object_detector_trainer.backends.rtmdet.load_rtmdet_baseline", _fake_load_rtmdet_baseline)
