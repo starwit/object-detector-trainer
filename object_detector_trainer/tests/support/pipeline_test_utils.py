@@ -57,7 +57,7 @@ BASE_PARAMS: Dict[str, Any] = {
             "epochs": 1,
             "batch_size": 1,
             "image_size": 320,
-            "allow_download": False,
+            "allow_download": True,
             "cache_dir": "models/pretrained/rtmdet",
         },
     },

@@ -211,9 +211,9 @@ def _resolve_rtmdet_assets(
             matches = sorted(cache_root.glob(f"**/{variant}.py"))
             if not matches:
                 download_note = (
-                    " Automatic downloads are disabled; pre-download the assets locally."
+                    ""
                     if allow_download
-                    else ""
+                    else " Automatic downloads are disabled; pre-download the assets locally."
                 )
                 raise FileNotFoundError(
                     f"Could not find config '{variant}.py' under {cache_root}. "
@@ -223,11 +223,25 @@ def _resolve_rtmdet_assets(
             cfg_path = matches[-1]
 
     if ckpt_path is None:
-        prefixed = sorted(cache_root.glob(f"**/{variant}*.pth")) if variant else []
-        any_pth = sorted(cache_root.glob("**/*.pth"))
-        candidates = prefixed or any_pth
-        if candidates:
-            ckpt_path = max(candidates, key=lambda p: p.stat().st_mtime)
+        if not variant:
+            raise ValueError(
+                "MMDetection backend needs either checkpoint_path or config_name "
+                "to locate a pretrained checkpoint."
+            )
+
+        candidates = sorted(cache_root.glob(f"**/{variant}*.pth"))
+        if not candidates:
+            download_note = (
+                ""
+                if allow_download
+                else " Automatic downloads are disabled; provision the assets locally first."
+            )
+            raise FileNotFoundError(
+                f"Could not find checkpoint '{variant}*.pth' under {cache_root}. "
+                "Use `mim download mmdet --config <name> --dest <cache_dir>` "
+                f"or set models.<key>.checkpoint_path.{download_note}"
+            )
+        ckpt_path = max(candidates, key=lambda p: p.stat().st_mtime)
 
     resolved_variant = variant or cfg_path.stem
     return cfg_path, ckpt_path, resolved_variant
