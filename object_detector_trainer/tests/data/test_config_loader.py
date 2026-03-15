@@ -37,6 +37,9 @@ def _write_minimal_config(path: Path) -> None:
                 "asset_id": "rtmdet_tiny_8xb32-300e_coco",
             }
         },
+        "evaluation": {
+            "baseline_weights_path": "models/current_best/best.pt",
+        },
     }
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
@@ -76,6 +79,9 @@ def test_resolve_training_config_requires_explicit_rfdetr_variant(tmp_path: Path
                 "asset_id": "rf-detr-nano.pth",
             }
         },
+        "evaluation": {
+            "baseline_weights_path": "models/current_best/best.pt",
+        },
     }
     params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     cfg = load_config(params_path)
@@ -99,9 +105,35 @@ def test_resolve_training_config_does_not_accept_rtmdet_variant_alias(tmp_path: 
                 "variant": "rtmdet_tiny_8xb32-300e_coco",
             }
         },
+        "evaluation": {
+            "baseline_weights_path": "models/current_best/best.pt",
+        },
     }
     params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     cfg = load_config(params_path)
 
     with pytest.raises(ValueError, match="must define asset_id"):
         resolve_training_config(SimpleNamespace(seed=42, model=None), cfg)
+
+
+def test_load_config_requires_baseline_weights_path(tmp_path: Path) -> None:
+    params_path = tmp_path / "params.yaml"
+    payload = {
+        "data": {
+            "dataset_name": "sample-ds",
+            "custom_classes": ["waste"],
+            "use_coco_classes": False,
+        },
+        "train": {"model": "yolov8n"},
+        "models": {
+            "yolov8n": {
+                "backend": "yolo",
+                "asset_id": "yolov8n.pt",
+            }
+        },
+        "evaluation": {},
+    }
+    params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="baseline_weights_path"):
+        load_config(params_path)

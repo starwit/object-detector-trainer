@@ -25,6 +25,20 @@ class DataConfig(BaseModel):
     class_mapping: dict[str, Any] = Field(default_factory=dict)
 
 
+class AutoReplayConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    max_new: int = 200
+    max_total: int = 400
+    iou_thr: float = 0.5
+    conf_thr: float = 0.25
+    border_conf: float = 0.35
+    include_empty: bool = True
+    seed: int = 42
+    dest: str = "raw_data/train/replay"
+
+
 class PrepareConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -32,7 +46,7 @@ class PrepareConfig(BaseModel):
     test_split: float = 0.1
     augment_multiplier: int = 1
     folder_subsets: dict[str, int | float] = Field(default_factory=dict)
-    auto_replay: dict[str, Any] = Field(default_factory=dict)
+    auto_replay: AutoReplayConfig = Field(default_factory=AutoReplayConfig)
 
 
 class TrainConfig(BaseModel):
@@ -48,7 +62,7 @@ class TrainConfig(BaseModel):
 class EvaluationConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    baseline_weights_path: str | None = None
+    baseline_weights_path: str = Field(min_length=1)
 
 
 class AppConfig(BaseModel):
@@ -58,7 +72,7 @@ class AppConfig(BaseModel):
     prepare: PrepareConfig = Field(default_factory=PrepareConfig)
     train: TrainConfig
     models: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    evaluation: EvaluationConfig
 
     @model_validator(mode="after")
     def validate_config(self) -> "AppConfig":

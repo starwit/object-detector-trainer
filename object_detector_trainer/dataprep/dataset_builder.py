@@ -315,7 +315,7 @@ def process_single_images(
             target_label = label_path / new_label_name
 
             link_or_copy(img_file, target_img)
-            link_or_copy(label_file, target_label)
+            shutil.copy2(label_file, target_label)
 
             if source_to_target_map:
                 remap_labels_with_class_mapping(

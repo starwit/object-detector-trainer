@@ -221,7 +221,8 @@ evaluation:
 
 ### Baseline & fine-tune weights
 
-- `evaluation.baseline_weights_path` is optional. If no `metadata.yaml` exists next to that path yet, evaluation runs on the trained model only (no baseline comparisons). If `metadata.yaml` exists, the weights file must also exist and be non-empty (otherwise evaluation fails loudly and you need to fetch/export the baseline).
+- `evaluation.baseline_weights_path` must always be configured. On fresh clones that path may point to a missing/empty file until a baseline is promoted; evaluation then runs on the trained model only.
+- If `metadata.yaml` exists next to `evaluation.baseline_weights_path`, the baseline is considered promoted and the weights file must also exist and be non-empty (otherwise evaluation fails loudly and you need to fetch/export the baseline).
 - Fine-tuning weights (`train.finetune.weights`) are required when `train.finetune.enabled: true` and must be a non-empty file.
 - Bootstrap provisions model assets only. Promoted baselines remain an explicit fetch/export step.
 - In a consumer project, use the project wrapper or `python -m object_detector_trainer.cli --stage bootstrap --config <params.yaml>` to prefetch model assets explicitly.

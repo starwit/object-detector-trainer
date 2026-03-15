@@ -67,12 +67,12 @@ def run_train_stage(args, config=None) -> TrainResult:
     )
 
     auto_replay_cfg = cfg.prepare.auto_replay
-    if auto_replay_cfg and auto_replay_cfg.get("enabled", False):
+    if auto_replay_cfg.enabled:
         build_or_update_replay_set(
             model=model,
             training_path=training_path,
             train_output_dir=train_output_dir,
-            config=auto_replay_cfg,
+            config=auto_replay_cfg.model_dump(exclude_none=True),
         )
 
     persist_train_result(

@@ -182,6 +182,29 @@ def _resolve_path(path_like: str | Path | None) -> Path | None:
     return path
 
 
+def _resolve_baseline_config_path(weights_path: Path, metadata: dict) -> Path | None:
+    adjacent_config = weights_path.parent / "model_config.py"
+    if adjacent_config.exists():
+        return adjacent_config
+
+    raw_config_path = metadata.get("model_config_path")
+    if not raw_config_path:
+        return None
+
+    raw_path = Path(str(raw_config_path)).expanduser()
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.append(weights_path.parent / raw_path)
+        candidates.append(Path.cwd() / raw_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _resolve_rtmdet_assets(
     *,
     config_path: str | Path | None,
@@ -368,23 +391,19 @@ def load_rtmdet_baseline(
             "Install `mmcv` (not `mmcv-lite`) matching your PyTorch/CUDA build."
         ) from e
 
-    config_path = weights_path.parent / "model_config.py"
-    if not config_path.exists():
-        config_from_meta = _resolve_path(metadata.get("model_config_path"))
-        if config_from_meta and config_from_meta.exists():
-            config_path = config_from_meta
-        else:
-            config_name = metadata.get("rtmdet_config_name")
-            if not config_name:
-                raise RuntimeError(
-                    "MMDetection baseline metadata must include model_config_path or rtmdet_config_name."
-                )
-            config_path, _unused_ckpt, _ = _resolve_rtmdet_assets(
-                config_path=None,
-                checkpoint_path=None,
-                config_name=str(config_name),
-                cache_dir=metadata.get("rtmdet_cache_dir"),
+    config_path = _resolve_baseline_config_path(weights_path, metadata)
+    if config_path is None:
+        config_name = metadata.get("rtmdet_config_name")
+        if not config_name:
+            raise RuntimeError(
+                "MMDetection baseline metadata must include model_config_path or rtmdet_config_name."
             )
+        config_path, _unused_ckpt, _ = _resolve_rtmdet_assets(
+            config_path=None,
+            checkpoint_path=None,
+            config_name=str(config_name),
+            cache_dir=metadata.get("rtmdet_cache_dir"),
+        )
 
     try:
         from mmdet.apis import init_detector
