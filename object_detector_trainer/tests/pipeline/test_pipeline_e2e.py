@@ -20,6 +20,8 @@ import csv
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
@@ -70,6 +72,37 @@ def stubbed_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
     return StubYOLO
+
+
+def _write_image(path: Path, fill: int) -> None:
+    image = np.full((96, 96, 3), fill, dtype=np.uint8)
+    cv2.rectangle(image, (24, 24), (72, 72), (255, 255, 255), -1)
+    cv2.imwrite(str(path), image)
+
+
+def _create_class_mapping_dataset(base_dir: Path) -> None:
+    train_images = base_dir / "raw_data" / "train" / "source1" / "images"
+    train_labels = base_dir / "raw_data" / "train" / "source1" / "labels"
+    test_images = base_dir / "raw_data" / "test" / "sourceT" / "images"
+    test_labels = base_dir / "raw_data" / "test" / "sourceT" / "labels"
+
+    for path in (train_images, train_labels, test_images, test_labels):
+        path.mkdir(parents=True, exist_ok=True)
+
+    train_specs = [
+        ("train_waste.jpg", "0 0.5 0.5 0.4 0.4\n", 60),
+        ("train_cigarette.jpg", "1 0.5 0.5 0.3 0.3\n", 110),
+        ("train_cigarette_2.jpg", "1 0.4 0.4 0.2 0.2\n", 150),
+    ]
+    for filename, label_text, fill in train_specs:
+        _write_image(train_images / filename, fill)
+        (train_labels / f"{Path(filename).stem}.txt").write_text(label_text, encoding="utf-8")
+
+    _write_image(test_images / "test_cigarette.jpg", 200)
+    (test_labels / "test_cigarette.txt").write_text(
+        "1 0.5 0.5 0.25 0.25\n",
+        encoding="utf-8",
+    )
 
 
 def _assert_results_exist(
@@ -330,3 +363,115 @@ def test_pipeline_missing_baseline_does_not_fall_back_to_finetune_weights(
     _assert_results_exist(workspace, dataset_name, expect_side_by_side=False)
 
     assert StubYOLO.recorded_models.count(str(finetune_weights)) == 1
+
+
+def test_pipeline_writes_merged_class_metrics_for_class_mapping(
+    stubbed_pipeline: StubYOLO,
+) -> None:
+    workspace = Path.cwd()
+    dataset_name = "mapped-dataset"
+    _create_class_mapping_dataset(workspace)
+    write_params_yaml(
+        workspace,
+        {
+            "data": {
+                "dataset_name": dataset_name,
+                "custom_classes": ["waste", "cigarette"],
+                "use_coco_classes": False,
+                "class_mapping": {
+                    "waste": ["waste", "cigarette"],
+                },
+            },
+        },
+    )
+    create_local_yolo_checkpoint(workspace)
+
+    args = build_args(dataset_name, {"val_split": 0.5})
+    run_prepare_stage(args)
+
+    raw_test_label = workspace / "raw_data" / "test" / "sourceT" / "labels" / "test_cigarette.txt"
+    assert raw_test_label.read_text(encoding="utf-8").strip().split()[0] == "1"
+
+    prepared_test_labels = workspace / "datasets" / dataset_name / "test" / "val" / "labels"
+    prepared_label = next(prepared_test_labels.glob("*.txt"))
+    prepared_tokens = prepared_label.read_text(encoding="utf-8").strip().split()
+    assert prepared_tokens[0] == "0"
+
+    run_train_eval_stage(args)
+    _assert_results_exist(workspace, dataset_name, expect_side_by_side=False)
+
+    metrics_payload = json.loads((workspace / "metrics.json").read_text(encoding="utf-8"))
+    assert "cigarette_as_waste_ap50" in metrics_payload
+    assert "cigarette_as_waste_n_objects" in metrics_payload
+
+    marker = json.loads((workspace / "runs" / ".last_train_result.json").read_text(encoding="utf-8"))
+    run_dir = Path(marker["train_output_dir"])
+    merged_results = run_dir / "merged_class_results.csv"
+    assert merged_results.exists()
+    merged_rows = merged_results.read_text(encoding="utf-8")
+    assert "cigarette" in merged_rows
+    assert "waste" in merged_rows
+
+
+def test_train_stage_builds_replay_set_when_auto_replay_enabled(
+    stubbed_pipeline: StubYOLO,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Path.cwd()
+    dataset_name = "replay-dataset"
+
+    val_images = workspace / "datasets" / dataset_name / "train" / "val" / "images"
+    val_labels = workspace / "datasets" / dataset_name / "train" / "val" / "labels"
+    for path in (val_images, val_labels):
+        path.mkdir(parents=True, exist_ok=True)
+
+    replay_image = val_images / "replay_candidate.jpg"
+    _write_image(replay_image, 90)
+    (val_labels / "replay_candidate.txt").write_text("", encoding="utf-8")
+
+    write_params_yaml(
+        workspace,
+        {
+            "data": {"dataset_name": dataset_name},
+            "prepare": {
+                "auto_replay": {
+                    "enabled": True,
+                    "max_new": 1,
+                    "max_total": 2,
+                    "include_empty": True,
+                    "dest": "raw_data/train/replay",
+                }
+            },
+        },
+    )
+
+    class _ReplayModel:
+        class_names = {0: "waste"}
+
+        def predict(self, *args, **kwargs):
+            class _Result:
+                boxes = []
+
+            return [_Result()]
+
+    def _fake_train_backend(*_args, **_kwargs):
+        run_dir = workspace / "runs" / "replay-contract"
+        (run_dir / "weights").mkdir(parents=True, exist_ok=True)
+        (run_dir / "weights" / "best.pt").write_bytes(b"replay-trained-weights")
+        return _ReplayModel(), run_dir, "replay-contract", 320, 1
+
+    monkeypatch.setattr(
+        "object_detector_trainer.pipeline.train_stage.train_backend",
+        _fake_train_backend,
+    )
+
+    args = build_args(dataset_name)
+    result = run_train_stage(args)
+
+    replay_root = workspace / "raw_data" / "train" / "replay"
+    assert (replay_root / "images" / replay_image.name).exists()
+    assert (replay_root / "labels" / "replay_candidate.txt").exists()
+    index_csv = replay_root / "index.csv"
+    assert index_csv.exists()
+    assert "replay-contract" in index_csv.read_text(encoding="utf-8")
+    assert result.train_output_dir == workspace / "runs" / "replay-contract"

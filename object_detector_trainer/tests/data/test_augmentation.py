@@ -10,20 +10,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pytest
 
 from object_detector_trainer.dataprep.dataset_builder import process_single_images
-
-# Silence third-party deprecations emitted during imgaug/imageio usage in this module only.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        # Some libs set stacklevel so the warning appears at the caller (imgaug).
-        "ignore:.*Starting with ImageIO v3.*:DeprecationWarning"
-    ),
-    pytest.mark.filterwarnings(
-        "ignore:.*`pilmode` is deprecated.*:DeprecationWarning:imageio.plugins.pillow"
-    ),
-]
 
 
 def _make_image(p: Path, seed: int = 0) -> None:

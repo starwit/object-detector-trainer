@@ -81,8 +81,10 @@ def _log_export_guidance(train_output_dir: Path, experiment_name: str) -> None:
         "",
         "Then track it with DVC:",
         "  dvc add models/current_best/best.pt models/current_best/metadata.yaml",
+        "  # If export created models/current_best/model_config.py (RTMDet), add that too.",
         "  dvc push",
         "  git add models/current_best/best.pt.dvc models/current_best/metadata.yaml.dvc",
+        "  # If present (RTMDet), also git add models/current_best/model_config.py.dvc",
         f'  git commit -m "Update baseline to {experiment_name}"',
         "=" * 70,
     ]
