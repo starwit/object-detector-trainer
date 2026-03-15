@@ -12,15 +12,16 @@ import pytest
 
 from object_detector_trainer.backends.registry import (
     normalize_backend_name,
+    require_bootstrapped_file,
     supported_backend_names,
 )
+from object_detector_trainer.cli import _set_deterministic_seed
 from object_detector_trainer.pipeline.bootstrap_stage import run_bootstrap_stage
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
 from object_detector_trainer.tests.support.pipeline_test_utils import (
     BASE_PARAMS,
-    copy_preprovisioned_model_assets,
     build_args,
     create_baseline_artifact,
     create_minimal_dataset,
@@ -69,31 +70,13 @@ BACKEND_CASES = _discover_backend_cases()
 if not BACKEND_CASES:
     raise RuntimeError("Heavy backend contract setup failed: no backend cases discovered from BASE_PARAMS.")
 
-def _provisioning_command() -> str:
-    return f"python {repo_root() / 'scripts' / 'provision_heavy_test_assets.py'}"
+
+def _shared_cache_dir(backend: str) -> Path:
+    return repo_root() / "models" / "pretrained" / backend
 
 
-def _copy_preprovisioned_assets(workspace: Path, *, model_key: str, model_cfg: dict[str, object]) -> Path:
-    try:
-        copied_yolo = copy_preprovisioned_model_assets(
-            source_workspace=repo_root(),
-            destination_workspace=workspace,
-            model_key="yolov8n",
-            model_cfg={"backend": "yolo", "asset_id": "yolov8n.pt"},
-        )
-        copy_preprovisioned_model_assets(
-            source_workspace=repo_root(),
-            destination_workspace=workspace,
-            model_key=model_key,
-            model_cfg=model_cfg,
-        )
-    except FileNotFoundError as exc:
-        pytest.fail(
-            "Heavy backend assets are not provisioned locally. "
-            f"Run `{_provisioning_command()}` first. Details: {exc}"
-        )
-
-    return copied_yolo[0]
+def _shared_yolo_checkpoint() -> Path:
+    return _shared_cache_dir("yolo") / "yolov8n.pt"
 
 
 def _assert_metrics_contract(workspace: Path) -> None:
@@ -153,7 +136,7 @@ def _write_backend_contract_params(
     dataset_name: str,
     backend: str,
     model_key: str,
-) -> Path | None:
+) -> tuple[Path, Path]:
     models_cfg = BASE_PARAMS.get("models", {})
     if not isinstance(models_cfg, dict):
         raise AssertionError("BASE_PARAMS.models must be a mapping.")
@@ -163,7 +146,10 @@ def _write_backend_contract_params(
 
     model_cfg: dict[str, object] = copy.deepcopy(source_cfg)
     model_cfg["backend"] = backend
-    model_cfg["allow_download"] = False
+    # Heavy tests intentionally exercise the real bootstrap path. The first run
+    # may download backend assets; later runs reuse the shared cache.
+    model_cfg["allow_download"] = True
+    model_cfg["cache_dir"] = str(_shared_cache_dir(backend))
     for key, value in (
         ("epochs", 1),
         ("batch_size", 1),
@@ -174,12 +160,14 @@ def _write_backend_contract_params(
         if key in model_cfg:
             model_cfg[key] = value
 
-    cache_dir = workspace / "models" / "pretrained" / backend
-    yolo_checkpoint = _copy_preprovisioned_assets(
-        workspace,
-        model_key=model_key,
-        model_cfg=model_cfg,
-    )
+    models_payload: dict[str, object] = {model_key: model_cfg}
+    if backend != "yolo":
+        yolo_cfg = copy.deepcopy(models_cfg.get("yolov8n", {}))
+        if not isinstance(yolo_cfg, dict):
+            raise AssertionError("BASE_PARAMS.models.yolov8n must be a mapping.")
+        yolo_cfg["allow_download"] = True
+        yolo_cfg["cache_dir"] = str(_shared_cache_dir("yolo"))
+        models_payload["yolov8n"] = yolo_cfg
 
     baseline_path = create_baseline_artifact(
         workspace,
@@ -187,7 +175,6 @@ def _write_backend_contract_params(
         model_backend="yolo",
         image_size=128,
     )
-    shutil.copy2(yolo_checkpoint, baseline_path)
 
     write_params_yaml(
         workspace,
@@ -199,11 +186,11 @@ def _write_backend_contract_params(
                 "epochs": 1,
                 "batch_size": 1,
             },
-            "models": {model_key: model_cfg},
+            "models": models_payload,
             "evaluation": {"baseline_weights_path": str(baseline_path)},
         },
     )
-    return cache_dir
+    return _shared_cache_dir(backend), baseline_path
 
 
 def _assert_wrapper_contract(model: object, backend: str) -> None:
@@ -228,14 +215,20 @@ def test_heavy_backend_contract_one_epoch(
     dataset_name = f"heavy-contract-{backend}"
 
     create_minimal_dataset(tmp_path, include_empty_train_sample=True)
-    backend_cache_dir = _write_backend_contract_params(
+    backend_cache_dir, baseline_path = _write_backend_contract_params(
         tmp_path,
         dataset_name=dataset_name,
         backend=backend,
         model_key=model_key,
     )
     args = build_args(dataset_name, {"model": model_key, "val_split": 0.25})
+    args.all_models = True
+    _set_deterministic_seed(args.seed, backend)
     run_bootstrap_stage(args)
+    shutil.copy2(
+        require_bootstrapped_file(_shared_yolo_checkpoint(), label="heavy-test baseline checkpoint"),
+        baseline_path,
+    )
     dataset_path = run_prepare_stage(args)
     _assert_background_only_sample(dataset_path)
     _assert_validation_labels_present(dataset_path)
@@ -255,6 +248,5 @@ def test_heavy_backend_contract_one_epoch(
     assert payload["reload_metadata"]["model_backend"] == backend
     assert Path(payload["best_weights_path"]).exists()
 
-    if backend_cache_dir is not None:
-        cache_files = [path for path in backend_cache_dir.rglob("*") if path.is_file()]
-        assert cache_files, f"{backend} contract expected local assets under cache_dir."
+    cache_files = [path for path in backend_cache_dir.rglob("*") if path.is_file()]
+    assert cache_files, f"{backend} contract expected local assets under cache_dir."

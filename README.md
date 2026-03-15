@@ -233,7 +233,16 @@ evaluation:
 - Fine-tuning weights (`train.finetune.weights`) are required when `train.finetune.enabled: true` and must be a non-empty file.
 - Bootstrap provisions model assets only. Promoted baselines remain an explicit fetch/export step.
 - In a consumer project, use the project wrapper or `python -m object_detector_trainer.cli --stage bootstrap --config <params.yaml>` to prefetch model assets explicitly.
-- In this repo, use `python scripts/provision_heavy_test_assets.py` to prefetch the local asset cache required by backend-heavy tests.
+- In this repo, heavy tests call bootstrap directly and reuse the repo-local cache under `models/pretrained/`; the first heavy run may download assets.
+
+### State guide
+
+- Consumer project with no promoted baseline yet:
+  Keep `evaluation.baseline_weights_path` configured, but do not commit `metadata.yaml` next to it yet. Evaluation then skips baseline comparison until the first promotion.
+- Consumer project with a promoted baseline:
+  Commit `metadata.yaml` next to the configured baseline path and fetch/export the actual weights separately. Bootstrap does not fetch promoted baselines.
+- Trainer repo heavy tests:
+  Use the editable install shown below, then run `pytest --heavy`. The tests call real bootstrap, may download assets on the first run, and then reuse `models/pretrained/`.
 
 ## Backends
 
@@ -374,15 +383,16 @@ Notes:
 This repo includes:
 
 - Unit tests + E2E pipeline smoke tests using stubs (fast, default)
-- Opt-in heavy integration tests (real backend training, requires preprovisioned local assets)
+- Opt-in heavy integration tests (real backend training; first run may download backend assets)
+
+This repository is installed with editable `pip`, not Poetry:
 
 Run:
 
 ```bash
 python -m pip install -e ".[dev,rtmdet]"
 python -m pytest -q
-python scripts/provision_heavy_test_assets.py
 python -m pytest object_detector_trainer/tests -q --heavy
 ```
 
-`pytest -m heavy` is not a valid substitute. The test suite requires the explicit `--heavy` flag and fails fast if the local heavy-test asset cache is missing.
+`pytest -m heavy` is not a valid substitute. The test suite requires the explicit `--heavy` flag. On the first heavy run, bootstrap may download the required model assets into `models/pretrained/`; later runs reuse that cache.
