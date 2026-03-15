@@ -50,7 +50,7 @@ include = ["object_detector_trainer*"]
 
 [tool.pytest.ini_options]
 markers = [
-  "heavy: opt-in integration tests (slower and/or environment-sensitive)",
+  "heavy: opt-in integration tests (real backend training; first run may download model assets)",
 ]
 testpaths = ["object_detector_trainer/tests"]
 norecursedirs = [".venv", "venv", "site-packages"]

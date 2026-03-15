@@ -10,17 +10,6 @@ import cv2
 import numpy as np
 import yaml
 
-from object_detector_trainer.backends.registry import (
-    _require_asset_id,
-    normalize_backend_name,
-    require_bootstrapped_file,
-)
-from object_detector_trainer.backends.rtmdet import _resolve_rtmdet_assets
-from object_detector_trainer.utils.path_ops import link_or_copy
-
-
-HEAVY_TEST_MODEL_KEYS = ("yolov8n", "rfdetr-nano", "rtmdet-tiny")
-
 
 BASE_PARAMS: Dict[str, Any] = {
     "data": {
@@ -101,48 +90,6 @@ def _resolve_workspace_path(workspace: Path, raw_path: str | None) -> Path | Non
     if not candidate.is_absolute():
         candidate = workspace / candidate
     return candidate
-
-
-def copy_preprovisioned_model_assets(
-    *,
-    source_workspace: Path,
-    destination_workspace: Path,
-    model_key: str,
-    model_cfg: dict[str, Any],
-) -> list[Path]:
-    backend = normalize_backend_name(model_cfg.get("backend"))
-    source_cache_dir = source_workspace / "models" / "pretrained" / backend
-    destination_cache_dir = _resolve_workspace_path(
-        destination_workspace,
-        str(model_cfg.get("cache_dir", f"models/pretrained/{backend}")),
-    )
-    if destination_cache_dir is None:
-        raise ValueError(f"Could not resolve destination cache directory for {model_key}.")
-    asset_id = _require_asset_id(model_key=model_key, model_cfg=model_cfg)
-
-    copied_paths: list[Path] = []
-    if backend in {"yolo", "rfdetr"}:
-        source_path = source_cache_dir / asset_id
-        require_bootstrapped_file(source_path, label=f"preprovisioned {backend} asset")
-        destination_path = destination_cache_dir / asset_id
-        link_or_copy(source_path, destination_path, prefer_hardlink=False)
-        copied_paths.append(destination_path)
-        return copied_paths
-
-    source_cfg, source_ckpt, _ = _resolve_rtmdet_assets(
-        config_path=None,
-        checkpoint_path=None,
-        config_name=asset_id,
-        cache_dir=source_cache_dir,
-    )
-    require_bootstrapped_file(source_cfg, label="preprovisioned rtmdet config")
-    require_bootstrapped_file(source_ckpt, label="preprovisioned rtmdet checkpoint")
-    destination_cfg = destination_cache_dir / source_cfg.name
-    destination_ckpt = destination_cache_dir / source_ckpt.name
-    link_or_copy(source_cfg, destination_cfg, prefer_hardlink=False)
-    link_or_copy(source_ckpt, destination_ckpt, prefer_hardlink=False)
-    copied_paths.extend([destination_cfg, destination_ckpt])
-    return copied_paths
 
 
 def create_local_yolo_checkpoint(

@@ -14,7 +14,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--heavy",
         action="store_true",
         default=False,
-        help="Run heavy integration tests (real backend training).",
+        help="Run heavy integration tests (real backend training; first run may download model assets).",
     )
 
 
