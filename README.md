@@ -25,17 +25,20 @@ its own thin entrypoint wrapper.
 
 ## Pipeline stages
 
-The pipeline is split into three explicit lifecycle stages:
+The pipeline has four explicit lifecycle stages:
 
-1. **Prepare** (`--stage prepare`)
+1. **Bootstrap** (`--stage bootstrap`)
+   - Resolves and prepares pretrained assets for the selected backend/model key
+   - Writes a bootstrap manifest used by downstream stages
+2. **Prepare** (`--stage prepare`)
    - Reads raw images/labels under `raw_data/`
    - Builds a YOLO-style dataset under `datasets/<dataset_name>/`
    - Applies class mapping / class merging (if configured)
-2. **Train** (`--stage train`)
+3. **Train** (`--stage train`)
    - Trains the selected backend (`yolo`, `rfdetr`, or `rtmdet`)
    - Writes run artifacts under `runs/` (including `weights/best.pt`)
    - Persists `runs/.last_train_result.json` for the evaluate stage
-3. **Evaluate** (`--stage evaluate`)
+4. **Evaluate** (`--stage evaluate`)
    - Loads the trained model (from the persisted pointer if needed)
    - Resolves a baseline model for comparison
    - Writes `metrics.json`
@@ -47,10 +50,14 @@ The pipeline is split into three explicit lifecycle stages:
 Run the stages via the core CLI:
 
 ```bash
+python -m object_detector_trainer.cli --stage bootstrap --model <model-key>
 python -m object_detector_trainer.cli --stage prepare --dataset-name <name>
 python -m object_detector_trainer.cli --stage train --dataset-name <name> --model <model-key>
 python -m object_detector_trainer.cli --stage evaluate --dataset-name <name> --model <model-key>
+python -m object_detector_trainer.cli --stage all --dataset-name <name> --model <model-key>
 ```
+
+`--stage all` runs bootstrap, prepare, train, and evaluate in order.
 
 ### Typical project wrapper (`train.py`)
 
