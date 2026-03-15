@@ -83,7 +83,7 @@ def _download_yolo_checkpoint(checkpoint_path: Path) -> Path:
             "YOLO checkpoint download requested but `ultralytics` is not installed."
         ) from e
     downloaded_path = Path(
-        attempt_download_asset(checkpoint_path.name, repo="ultralytics/assets", release="latest")
+        attempt_download_asset(checkpoint_path.name, repo="ultralytics/assets")
     ).expanduser()
     if not downloaded_path.is_absolute():
         downloaded_path = Path.cwd() / downloaded_path
@@ -94,7 +94,9 @@ def _download_yolo_checkpoint(checkpoint_path: Path) -> Path:
     if downloaded_path.resolve() != checkpoint_path.resolve():
         link_or_copy(downloaded_path, checkpoint_path, prefer_hardlink=False)
     if not is_ready_file(checkpoint_path):
-        raise FileNotFoundError(f"YOLO checkpoint download did not create a usable file at {checkpoint_path}.")
+        raise FileNotFoundError(
+            f"YOLO checkpoint download did not create a usable file at {checkpoint_path}."
+        )
     if downloaded_path.resolve() != checkpoint_path.resolve() and downloaded_path.parent == Path.cwd():
         with suppress(FileNotFoundError):
             downloaded_path.unlink()

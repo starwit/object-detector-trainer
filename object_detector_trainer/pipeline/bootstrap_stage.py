@@ -27,50 +27,6 @@ def _fingerprint(path: Path | None) -> dict[str, object] | None:
     }
 
 
-def _bootstrap_baseline(weights_path: str | Path | None) -> dict[str, object]:
-    baseline_path = resolve_workspace_path(weights_path)
-    if baseline_path is None:
-        return {
-            "configured_weights_path": None,
-            "promoted": False,
-            "weights": None,
-            "metadata": None,
-        }
-
-    metadata_candidates = (
-        baseline_path.parent / "metadata.yaml",
-        baseline_path.parent.parent / "metadata.yaml",
-    )
-    metadata_dvc_candidates = [p.with_name(f"{p.name}.dvc") for p in metadata_candidates]
-    baseline_promoted = any(p.exists() for p in metadata_candidates) or any(
-        p.exists() for p in metadata_dvc_candidates
-    )
-    if not baseline_promoted:
-        # Template / first-run repos intentionally have no promoted baseline yet.
-        return {
-            "configured_weights_path": str(baseline_path),
-            "promoted": False,
-            "weights": None,
-            "metadata": None,
-        }
-
-    # Promoted baseline: record whether metadata/weights are present locally.
-    # Do not auto-run `dvc pull` here: training does not require baselines, and
-    # evaluation emits a clear error if a promoted baseline is missing locally.
-    resolved_meta: Path | None = None
-    for meta_path in metadata_candidates:
-        if meta_path.exists():
-            resolved_meta = meta_path
-            break
-
-    return {
-        "configured_weights_path": str(baseline_path),
-        "promoted": True,
-        "weights": _fingerprint(baseline_path),
-        "metadata": _fingerprint(resolved_meta),
-    }
-
-
 def _iter_bootstrap_model_keys(args, cfg) -> list[str]:
     if bool(getattr(args, "all_models", False)):
         return sorted(cfg.models.keys())
@@ -130,12 +86,10 @@ def _resolve_model_assets(model_key: str, model_cfg: dict) -> dict[str, object]:
 
 def _write_bootstrap_manifest(
     *,
-    baseline_info: dict[str, object],
     model_assets: dict[str, dict[str, object]],
 ) -> Path:
     manifest = {
         "version": 1,
-        "baseline": baseline_info,
         "models": model_assets,
     }
     out_path = Path(".tmp") / "bootstrap_manifest.json"
@@ -146,7 +100,6 @@ def _write_bootstrap_manifest(
 
 def run_bootstrap_stage(args, config=None) -> None:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
-    baseline_info = _bootstrap_baseline(cfg.evaluation.baseline_weights_path)
 
     assets: dict[str, dict[str, object]] = {}
     for model_key in _iter_bootstrap_model_keys(args, cfg):
@@ -156,4 +109,4 @@ def run_bootstrap_stage(args, config=None) -> None:
         _bootstrap_model_assets(str(model_key), model_cfg)
         assets[str(model_key)] = _resolve_model_assets(str(model_key), model_cfg)
 
-    _write_bootstrap_manifest(baseline_info=baseline_info, model_assets=assets)
+    _write_bootstrap_manifest(model_assets=assets)

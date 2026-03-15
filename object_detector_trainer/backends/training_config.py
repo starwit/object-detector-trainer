@@ -15,7 +15,6 @@ def _as_mapping(value: Any) -> dict:
 def resolve_training_config(args, config: AppConfig) -> dict:
     train_cfg = config.train.model_dump()
     models_cfg = config.models
-    eval_cfg = config.evaluation.model_dump()
 
     selected_model = getattr(args, "model", None) or train_cfg.get("model")
     if not selected_model:
@@ -56,7 +55,6 @@ def resolve_training_config(args, config: AppConfig) -> dict:
         "image_size": int(model_cfg.get("image_size", shared_image_size)),
         "epochs": int(model_cfg.get("epochs", shared_epochs)),
         "batch_size": int(model_cfg.get("batch_size", shared_batch_size)),
-        "baseline_weights_path": eval_cfg.get("baseline_weights_path"),
         "finetune_mode": finetune_enabled,
         "pretrained_model_path": finetune_weights,
         "finetune_lr": finetune_lr,

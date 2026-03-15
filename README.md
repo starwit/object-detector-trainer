@@ -359,7 +359,7 @@ Fine-tuning is supported for YOLO backends:
 train:
   finetune:
     enabled: true
-    weights: models/current_best/best.pt
+    weights: models/finetune/best.pt
     lr: 0.0001
     epochs: 60
     freeze_backbone: false
@@ -368,6 +368,7 @@ train:
 Notes:
 
 - Fine-tuning rejects missing or empty weight files.
+- The fine-tune weights path is consumer-project policy; it does not have to be the promoted evaluation baseline.
 - Evaluation compares against the configured baseline when it is available; it does not substitute fine-tune weights or alternate checkpoints.
 
 ## Outputs
