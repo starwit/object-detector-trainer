@@ -11,6 +11,7 @@ Supported backends:
 
 This repository documents the trainer itself.
 Project-specific concerns such as DVC wiring, repo-local experiment workflows, baseline promotion policy, and large parameter catalogs belong in consumer project repositories.
+That also includes any helper that exports or promotes a trained run into a project baseline location.
 
 ## What This Repo Covers
 
