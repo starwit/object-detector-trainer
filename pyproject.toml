@@ -2,7 +2,7 @@
 name = "object-detector-trainer"
 version = "0.1.0"
 description = "Reusable multi-backend object detection training core"
-authors = ["starwit"]
+authors = ["edblu1"]
 license = "AGPL-3.0-only"
 readme = "README.md"
 packages = [{ include = "object_detector_trainer" }]
