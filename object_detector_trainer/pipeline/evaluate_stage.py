@@ -73,18 +73,10 @@ def _log_export_guidance(train_output_dir: Path, experiment_name: str) -> None:
     guidance_lines = [
         "",
         "=" * 70,
-        "Training complete! Next steps:",
-        "=" * 70,
-        "",
-        "To promote this run as the comparison baseline:",
-        f"  python tools/export_baseline.py --run-dir {train_output_dir}",
-        "",
-        "Then track it with DVC:",
-        "  dvc add models/current_best/best.pt",
-        "  dvc push",
-        "  git add models/current_best/best.pt.dvc models/current_best/metadata.yaml",
-        "  # If present (RTMDet), also git add models/current_best/model_config.py",
-        f'  git commit -m "Update baseline to {experiment_name}"',
+        f"Training complete for {experiment_name}.",
+        f"Run artifacts: {train_output_dir}",
+        "Baseline promotion/export is intentionally project-specific.",
+        "Use the workflow defined by the consumer project for baseline updates.",
         "=" * 70,
     ]
     for line in guidance_lines:
