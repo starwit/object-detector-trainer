@@ -30,8 +30,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     if _explicit_heavy_selection(config, items):
         raise pytest.UsageError(
-            "Heavy tests require the explicit `--heavy` flag. "
-            "Use `pytest --heavy` (and optionally add a nodeid), not `pytest -m heavy`."
+            "Heavy tests are enabled via the `--heavy` flag. "
+            "Use `pytest --heavy` (optionally with a nodeid)."
         )
 
     skip_heavy = pytest.mark.skip(reason="Need --heavy option to run heavy tests.")
