@@ -11,6 +11,8 @@ from object_detector_trainer.dataprep.labels import convert_polygons_to_bboxes_i
 from object_detector_trainer.dataprep.sampling import apply_subset_sampling
 from object_detector_trainer.dataprep.types import ImageLabelPair, ProcessedFolder
 
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
+
 
 def sorted_iterdir(path: Path) -> list[Path]:
     return sorted(path.iterdir(), key=lambda p: p.name)
@@ -20,11 +22,18 @@ def sorted_glob(paths) -> list[Path]:
     return sorted(paths, key=lambda p: p.name)
 
 
+def _contains_supported_images(root: Path) -> bool:
+    for candidate in root.rglob("*"):
+        if candidate.is_file() and candidate.suffix.lower() in _IMAGE_SUFFIXES:
+            return True
+    return False
+
+
 def check_for_test_images(test_image_input_path: Path) -> bool:
     if not test_image_input_path.exists():
         return False
     for image_folder in sorted_iterdir(test_image_input_path):
-        if image_folder.is_dir():
+        if image_folder.is_dir() and _contains_supported_images(image_folder):
             return True
     return False
 
@@ -152,7 +161,7 @@ def process_manual_folder(
         labels_folder.mkdir(parents=True, exist_ok=True)
 
     for image_file in sorted_glob(images_folder.glob("*")):
-        if image_file.is_file() and image_file.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
+        if image_file.is_file() and image_file.suffix.lower() in _IMAGE_SUFFIXES:
             label_file = labels_folder / image_file.with_suffix(".txt").name
             if not label_file.exists() or label_file.stat().st_size == 0:
                 label_file.touch()

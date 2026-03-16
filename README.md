@@ -119,6 +119,8 @@ poetry run object-detector-trainer --stage all --workspace-root /path/to/workspa
 
 `--config` defaults to `params.yaml` inside the workspace root.
 Relative config paths are resolved from `--workspace-root`.
+When using the trainer CLI directly, `prepare` and `all` skip rebuilding an existing
+`datasets/<dataset_name>/` unless you pass `--recreate-dataset`.
 
 ## CLI Stages
 
