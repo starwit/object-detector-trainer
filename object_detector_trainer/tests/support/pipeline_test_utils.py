@@ -10,6 +10,94 @@ import cv2
 import numpy as np
 import yaml
 
+from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
+
+
+# Canonical per-backend test models. The heavy/contract suites derive their
+# backend coverage from this mapping so adding a new supported backend forces a
+# single explicit test-model choice here instead of drifting across files.
+_REPRESENTATIVE_MODEL_SPECS_BY_BACKEND: Dict[str, tuple[str, Dict[str, Any]]] = {
+    "yolo": (
+        "yolov8n",
+        {
+            "backend": "yolo",
+            "asset_id": "yolov8n.pt",
+        },
+    ),
+    "rfdetr": (
+        "rfdetr-nano",
+        {
+            "backend": "rfdetr",
+            "variant": "nano",
+            "asset_id": "rf-detr-nano.pth",
+            "resolution": 320,
+            "epochs": 1,
+            "batch_size": 1,
+            "grad_accum_steps": 1,
+        },
+    ),
+    "rtmdet": (
+        "rtmdet-tiny",
+        {
+            "backend": "rtmdet",
+            "asset_id": "rtmdet_tiny_8xb32-300e_coco",
+            "epochs": 1,
+            "batch_size": 1,
+            "image_size": 320,
+        },
+    ),
+}
+
+
+def _validated_representative_model_specs() -> Dict[str, tuple[str, Dict[str, Any]]]:
+    expected_backends = set(supported_backend_names())
+    configured_backends = set(_REPRESENTATIVE_MODEL_SPECS_BY_BACKEND)
+    if expected_backends != configured_backends:
+        missing = sorted(expected_backends - configured_backends)
+        extra = sorted(configured_backends - expected_backends)
+        raise RuntimeError(
+            "Representative backend test coverage drifted. "
+            f"Missing backends: {missing or 'none'}. Extra backends: {extra or 'none'}."
+        )
+
+    for backend, (model_key, model_cfg) in _REPRESENTATIVE_MODEL_SPECS_BY_BACKEND.items():
+        resolved_backend = normalize_backend_name(model_cfg.get("backend"))
+        if resolved_backend != backend:
+            raise RuntimeError(
+                f"Representative model {model_key!r} is registered for backend {backend!r}, "
+                f"but its config declares {resolved_backend!r}."
+            )
+    return _REPRESENTATIVE_MODEL_SPECS_BY_BACKEND
+
+
+REPRESENTATIVE_MODEL_SPECS_BY_BACKEND = _validated_representative_model_specs()
+REPRESENTATIVE_MODEL_KEYS_BY_BACKEND = {
+    backend: model_key
+    for backend, (model_key, _model_cfg) in REPRESENTATIVE_MODEL_SPECS_BY_BACKEND.items()
+}
+
+
+def representative_model_cases() -> list[tuple[str, str]]:
+    return [
+        (model_key, backend)
+        for backend, model_key in sorted(REPRESENTATIVE_MODEL_KEYS_BY_BACKEND.items())
+    ]
+
+
+def representative_model_key_for_backend(backend: str) -> str:
+    normalized_backend = normalize_backend_name(backend)
+    if normalized_backend not in REPRESENTATIVE_MODEL_KEYS_BY_BACKEND:
+        raise RuntimeError(f"No representative test model configured for backend: {backend!r}")
+    return REPRESENTATIVE_MODEL_KEYS_BY_BACKEND[normalized_backend]
+
+
+def representative_model_config_for_backend(backend: str) -> Dict[str, Any]:
+    normalized_backend = normalize_backend_name(backend)
+    if normalized_backend not in REPRESENTATIVE_MODEL_SPECS_BY_BACKEND:
+        raise RuntimeError(f"No representative test model configured for backend: {backend!r}")
+    _model_key, model_cfg = REPRESENTATIVE_MODEL_SPECS_BY_BACKEND[normalized_backend]
+    return copy.deepcopy(model_cfg)
+
 
 BASE_PARAMS: Dict[str, Any] = {
     "data": {
@@ -25,7 +113,7 @@ BASE_PARAMS: Dict[str, Any] = {
         "folder_subsets": {},
     },
     "train": {
-        "model": "yolov8n",
+        "model": REPRESENTATIVE_MODEL_KEYS_BY_BACKEND["yolo"],
         "image_size": 320,
         "epochs": 1,
         "batch_size": 1,
@@ -43,26 +131,8 @@ BASE_PARAMS: Dict[str, Any] = {
         "rtmdet": {"cache_dir": "models/pretrained/rtmdet", "allow_download": True},
     },
     "models": {
-        "yolov8n": {
-            "backend": "yolo",
-            "asset_id": "yolov8n.pt",
-        },
-        "rfdetr-nano": {
-            "backend": "rfdetr",
-            "variant": "nano",
-            "asset_id": "rf-detr-nano.pth",
-            "resolution": 320,
-            "epochs": 1,
-            "batch_size": 1,
-            "grad_accum_steps": 1,
-        },
-        "rtmdet-tiny": {
-            "backend": "rtmdet",
-            "asset_id": "rtmdet_tiny_8xb32-300e_coco",
-            "epochs": 1,
-            "batch_size": 1,
-            "image_size": 320,
-        },
+        model_key: copy.deepcopy(model_cfg)
+        for model_key, model_cfg in REPRESENTATIVE_MODEL_SPECS_BY_BACKEND.values()
     },
     "evaluation": {
         "baseline_weights_path": "models/current_best/best.pt",
@@ -104,6 +174,38 @@ def create_local_yolo_checkpoint(
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_path.write_bytes(payload)
     return resolved_path
+
+
+def create_local_rfdetr_checkpoint(
+    workspace: Path,
+    *,
+    checkpoint_path: str = "models/pretrained/rfdetr/rf-detr-nano.pth",
+    payload: bytes = b"stub-rfdetr-checkpoint",
+) -> Path:
+    resolved_path = _resolve_workspace_path(workspace, checkpoint_path)
+    if resolved_path is None:
+        raise ValueError("checkpoint_path must be provided for local RF-DETR checkpoint creation.")
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_bytes(payload)
+    return resolved_path
+
+
+def create_local_rtmdet_assets(
+    workspace: Path,
+    *,
+    cache_dir: str = "models/pretrained/rtmdet",
+    config_name: str = "rtmdet_tiny_8xb32-300e_coco",
+) -> tuple[Path, Path]:
+    resolved_cache_dir = _resolve_workspace_path(workspace, cache_dir)
+    if resolved_cache_dir is None:
+        raise ValueError("cache_dir must be provided for local RTMDet asset creation.")
+    resolved_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg_path = resolved_cache_dir / f"{config_name}.py"
+    ckpt_path = resolved_cache_dir / f"{config_name}_stub.pth"
+    cfg_path.write_text("# rtmdet stub\n", encoding="utf-8")
+    ckpt_path.write_bytes(b"stub-rtmdet-checkpoint")
+    return cfg_path, ckpt_path
 
 
 def create_baseline_artifact(

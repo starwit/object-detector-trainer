@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -362,17 +363,15 @@ def bootstrap_model_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path
             raise FileNotFoundError(
                 f"models.{model_key} RF-DETR checkpoint is missing: {checkpoint_path}."
             )
-        from rfdetr.main import HOSTED_MODELS
-        from rfdetr.util.files import download_file
+        from rfdetr.assets.model_weights import download_pretrain_weights
 
-        url = HOSTED_MODELS.get(checkpoint_path.name)
-        if not url:
-            raise ValueError(
-                f"Unsupported RF-DETR asset for bootstrap: {checkpoint_path.name}. "
-                "Use a hosted RF-DETR checkpoint name or provision it manually."
-            )
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        download_file(url, str(checkpoint_path))
+        cwd = Path.cwd()
+        try:
+            os.chdir(checkpoint_path.parent)
+            download_pretrain_weights(checkpoint_path.name)
+        finally:
+            os.chdir(cwd)
     return require_bootstrapped_file(
         checkpoint_path,
         label=f"models.{model_key}.checkpoint",

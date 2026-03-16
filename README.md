@@ -1,399 +1,263 @@
-# Trainer Core — Multi-backend Object Detection Pipeline
+# Object Detector Trainer
 
-Trainer Core is a reusable training/evaluation engine for object detection.
-It prepares YOLO-style datasets, trains a selected backend, and produces
-comparable metrics/reports across model families.
+`object-detector-trainer` is a reusable multi-backend training pipeline for object detection.
+It prepares datasets from raw labeled data, bootstraps pretrained assets, trains a selected backend, and writes comparable evaluation outputs across model families.
 
-It is designed to be consumed from a project repository (for example a
-`waste-detection` repo) where that project owns `params.yaml`, DVC wiring, and
-its own thin entrypoint wrapper.
-
-## Supported backends
+Supported backends:
 
 - Ultralytics YOLO (`backend: yolo`)
 - RF-DETR (`backend: rfdetr`)
 - RTMDet via MMDetection (`backend: rtmdet`)
 
-## Repository layout
+This repository documents the trainer itself.
+Project-specific concerns such as DVC wiring, repo-local experiment workflows, baseline promotion policy, and large parameter catalogs belong in consumer project repositories.
 
-- Backends (`yolo`, `rfdetr`, `rtmdet`): `object_detector_trainer/backends/`
-- Dataset preparation/import: `object_detector_trainer/dataprep/`
-- Pipeline stages: `object_detector_trainer/pipeline/`
-- Evaluation + reporting: `object_detector_trainer/evaluation/`
-- Model adapters (so non-YOLO models look like Ultralytics for eval): `object_detector_trainer/wrappers/`
-- Config schema + overrides: `object_detector_trainer/config/`
+## What This Repo Covers
 
-## Pipeline stages
+- Dataset preparation from `raw_data/`
+- Multi-stage training and evaluation CLI
+- Backend adapters and pretrained asset bootstrap
+- Shared reporting and metrics outputs
+- Trainer-level tests, including real backend integration coverage
 
-The pipeline has four explicit lifecycle stages:
+## Install
 
-1. **Bootstrap** (`--stage bootstrap`)
-   - Resolves and prepares pretrained assets for the selected backend/model key
-   - Writes a bootstrap manifest used by downstream stages
-2. **Prepare** (`--stage prepare`)
-   - Reads raw images/labels under `raw_data/`
-   - Builds a YOLO-style dataset under `datasets/<dataset_name>/`
-   - Applies class mapping / class merging (if configured)
-3. **Train** (`--stage train`)
-   - Trains the selected backend (`yolo`, `rfdetr`, or `rtmdet`)
-   - Writes run artifacts under `runs/` (including `weights/best.pt`)
-   - Persists `runs/.last_train_result.json` for the evaluate stage
-4. **Evaluate** (`--stage evaluate`)
-   - Loads the trained model (from the persisted pointer if needed)
-   - Resolves a baseline model for comparison
-   - Writes `metrics.json`
-   - Writes run-owned artifacts into `runs/<run_name>/`
-   - Writes summary-only comparison outputs to `results_comparison/` (`results.csv`, `results.txt`)
+Python `3.11+` is required.
 
-## Running
-
-Run the stages via the core CLI:
+Base install:
 
 ```bash
-python -m object_detector_trainer.cli --stage bootstrap --model <model-key>
-python -m object_detector_trainer.cli --stage prepare --dataset-name <name>
-python -m object_detector_trainer.cli --stage train --dataset-name <name> --model <model-key>
-python -m object_detector_trainer.cli --stage evaluate --dataset-name <name> --model <model-key>
-python -m object_detector_trainer.cli --stage all --dataset-name <name> --model <model-key>
+poetry install
 ```
 
-`--stage all` runs bootstrap, prepare, train, and evaluate in order.
+Run the CLI:
 
-### Typical project wrapper (`train.py`)
-
-In a project repo that depends on `object-detector-trainer` (import namespace `object_detector_trainer`), use a tiny wrapper that
-injects project-local defaults for workspace + config:
-
-```python
-from __future__ import annotations
-
-import argparse
-import sys
-from pathlib import Path
-
-from object_detector_trainer.cli import main as core_main
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-
-
-def _inject_defaults(argv: list[str]) -> list[str]:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--stage")
-    parser.add_argument("--workspace-root")
-    parser.add_argument("--config")
-    known, _ = parser.parse_known_args(argv)
-
-    out = list(argv)
-    if known.stage is None:
-        out.extend(["--stage", "train"])
-    if known.workspace_root is None:
-        out.extend(["--workspace-root", str(PROJECT_ROOT)])
-    if known.config is None:
-        out.extend(["--config", str(PROJECT_ROOT / "params.yaml")])
-    return out
-
-
-if __name__ == "__main__":
-    raise SystemExit(core_main(_inject_defaults(sys.argv[1:])))
+```bash
+poetry run object-detector-trainer --help
 ```
 
-### Common CLI options
+You can also invoke it as a module:
 
-- `--workspace-root .`: root directory for pipeline I/O (`raw_data/`, `datasets/`, `runs/`, `results_comparison/`, `metrics.json`)
-- `--config params.yaml`: config path (defaults to `params.yaml`)
-- `--model <key>`: selects a key under `models.*` (overrides `train.model`)
-- `--set key=value`: override config keys (supports dot paths)
-- `--val-split`, `--test-split`: adjust dataset splits
-- `--recreate-dataset`: rebuild `datasets/<dataset_name>/` from `raw_data/`
-- `--augment-multiplier`: increase augmentation rate during preparation
-- `--folder-subset <folder> <ratio>`: override `prepare.folder_subsets`
+```bash
+poetry run python -m object_detector_trainer.cli --help
+```
 
-## Configuration defaults (`models_defaults`)
+### RTMDet Setup
 
-Project repos typically keep most “knobs” in `train:` and only put backend-specific wiring in `models.<key>`.
+RTMDet needs the optional dependencies plus compiled `mmcv` ops.
 
-Trainer Core supports an optional `models_defaults` section in `params.yaml` to avoid repeating the same keys across many models:
+Install the extra:
 
-- `models_defaults.<backend>` is merged into every `models.<key>` with `backend: <backend>`.
-- `models.<key>` always overrides `models_defaults.<backend>`.
-- `train.image_size` / `train.epochs` / `train.batch_size` are shared defaults and apply when a model doesn’t define `image_size` / `epochs` / `batch_size`.
+```bash
+poetry install -E rtmdet
+```
 
-Example:
+Method 1: OpenMMLab prebuilt wheels
+
+```bash
+poetry run mim install mmcv==2.1.0
+poetry run python -c "import mmcv._ext"
+```
+
+Method 2: build from source
+
+```bash
+MMCV_WITH_OPS=1 poetry run pip install "mmcv==2.1.0" --no-binary=mmcv --no-build-isolation --no-cache-dir
+poetry run python -c "import mmcv._ext"
+```
+
+## Quick Start
+
+The trainer expects a workspace root containing:
+
+```text
+workspace/
+  params.yaml
+  raw_data/
+    train/
+    test/
+```
+
+Minimal `params.yaml`:
 
 ```yaml
+data:
+  dataset_name: demo
+  custom_classes: [waste, cigarette]
+  use_coco_classes: false
+
 train:
+  model: yolo11n
   image_size: 1280
   epochs: 100
   batch_size: 8
 
-models_defaults:
-  rtmdet:
-    cache_dir: models/pretrained/rtmdet
-    allow_download: true
-
 models:
-  rtmdet-m:
-    backend: rtmdet
-    asset_id: rtmdet_m_8xb32-300e_coco
-```
-
-## Tests
-
-Core test suites live under `object_detector_trainer/tests/`:
-
-- `data/`
-- `pipeline/`
-- `wrappers/`
-- `utils/`
-
-When split into a dedicated repository, keep this test layout unchanged.
-
-## Split Checklist
-
-When extracting Trainer Core into its own repository/module (for example
-`object-detector-trainer`):
-
-1. Keep the Python import package name as `object_detector_trainer` initially (avoid churn).
-2. Move `object_detector_trainer/` and `object_detector_trainer/tests/` as-is into the new repo.
-3. Add package metadata (`pyproject.toml`) in the new repo root.
-4. In consumer project repos:
-   - add dependency on the published core package,
-   - keep a project-local `train.py` wrapper,
-   - keep project-local `params.yaml`, `dvc.yaml`, and setup/bootstrap scripts.
-
-## Configuration (`params.yaml`)
-
-Backends are selected via `train.model` (a key under `models.*`) and `models.<key>.backend`.
-
-See `object_detector_trainer/config/schema.py` for the validated shape and defaults.
-
-Minimal example:
-
-```yaml
-data:
-  dataset_name: waste-detection
-  # Either set a class list...
-  custom_classes: [waste, cigarette]
-  use_coco_classes: false
-  # Optional: merge multiple source classes into one during training.
-  class_mapping: {}
-
-prepare:
-  val_split: 0.1
-  test_split: 0.1
-  augment_multiplier: 1
-  folder_subsets: {}
-
-train:
-  model: yolo11m                # key under models.*
-  image_size: 1280
-  epochs: 100
-  batch_size: 4
-  finetune:
-    enabled: false
-    weights: models/current_best/best.pt
-
-models_defaults:
-  yolo:
-    cache_dir: models/pretrained/yolo
-    allow_download: true
-  rfdetr:
-    cache_dir: models/pretrained/rfdetr
-    allow_download: true
-  rtmdet:
-    cache_dir: models/pretrained/rtmdet
-    allow_download: true
-
-models:
-  yolo11m:
+  yolo11n:
     backend: yolo
-    asset_id: yolo11m.pt
-  rfdetr-medium:
-    backend: rfdetr
-    variant: medium
-    asset_id: rf-detr-medium.pth
-    resolution: 1280
-  rtmdet-m:
-    backend: rtmdet
-    asset_id: rtmdet_m_8xb32-300e_coco
+    asset_id: yolo11n.pt
 
 evaluation:
   baseline_weights_path: models/current_best/best.pt
 ```
 
-### `data.custom_classes` vs `data.use_coco_classes`
-
-- If `data.custom_classes` is non-empty, those names become class 0…n-1.
-- If it’s empty and `data.use_coco_classes: true`, the pipeline falls back to the configured COCO subset.
-
-### Baseline & fine-tune weights
-
-- `evaluation.baseline_weights_path` must always be configured. On fresh clones that path may point to a missing/empty file until a baseline is promoted; evaluation then runs on the trained model only.
-- If `metadata.yaml` exists next to `evaluation.baseline_weights_path`, the baseline is considered promoted and the weights file must also exist and be non-empty (otherwise evaluation fails loudly and you need to fetch/export the baseline).
-- Fine-tuning weights (`train.finetune.weights`) are required when `train.finetune.enabled: true` and must be a non-empty file.
-- Bootstrap provisions model assets only. Promoted baselines remain an explicit fetch/export step.
-- In a consumer project, use the project wrapper or `python -m object_detector_trainer.cli --stage bootstrap --config <params.yaml>` to prefetch model assets explicitly.
-- In this repo, heavy tests call bootstrap directly and reuse the repo-local cache under `models/pretrained/`; the first heavy run may download assets.
-
-### State guide
-
-- Consumer project with no promoted baseline yet:
-  Keep `evaluation.baseline_weights_path` configured, but do not commit `metadata.yaml` next to it yet. Evaluation then skips baseline comparison until the first promotion.
-- Consumer project with a promoted baseline:
-  Commit `metadata.yaml` next to the configured baseline path and fetch/export the actual weights separately. Bootstrap does not fetch promoted baselines.
-- Trainer repo heavy tests:
-  Use the editable install shown below, then run `pytest --heavy`. The tests call real bootstrap, may download assets on the first run, and then reuse `models/pretrained/`.
-
-## Backends
-
-### Ultralytics YOLO (`backend: yolo`)
-
-- Uses `ultralytics.YOLO`.
-- `models.<key>.asset_id` is the pretrained checkpoint filename (e.g. `yolo11m.pt`).
-- The checkpoint is expected at `models_defaults.yolo.cache_dir / asset_id` after bootstrap.
-- Fine-tuning is supported via `train.finetune.*`.
-
-### RF-DETR (`backend: rfdetr`)
-
-- Uses the `rfdetr` Python package.
-- `rfdetr` is a standard project dependency (installed via Poetry with the rest of the repo).
-- `models.<key>.asset_id` is the pretrained checkpoint filename (e.g. `rf-detr-nano.pth`).
-- The checkpoint is expected at `models_defaults.rfdetr.cache_dir / asset_id` after bootstrap.
-- The backend trains via RF-DETR’s Roboflow dataset loader; the pipeline creates a tiny bridge layout under `.tmp/` and cleans it up after training.
-- RF-DETR resolution has divisibility constraints; the pipeline will auto-adjust and print a warning if needed.
-
-### RTMDet / MMDetection (`backend: rtmdet`)
-
-- Requires `mmdet`, `mmengine`, and **full `mmcv` ops** (`mmcv`, not `mmcv-lite`).
-- `models.<key>.asset_id` is the MMDetection config name (e.g. `rtmdet_m_8xb32-300e_coco`).
-- Config/checkpoint files are expected under `models_defaults.rtmdet.cache_dir` after bootstrap.
-- Uses a temporary COCO export under `.tmp/` for training and evaluation.
-- You can predownload configs/checkpoints for reproducible offline runs:
+Run the pipeline:
 
 ```bash
-mim download mmdet --config rtmdet_m_8xb32-300e_coco --dest models/pretrained/rtmdet
+poetry run object-detector-trainer --stage bootstrap --workspace-root /path/to/workspace
+poetry run object-detector-trainer --stage prepare --workspace-root /path/to/workspace
+poetry run object-detector-trainer --stage train --workspace-root /path/to/workspace
+poetry run object-detector-trainer --stage evaluate --workspace-root /path/to/workspace
 ```
 
-## Raw data layouts (`raw_data/`)
-
-Put raw data in:
-
-- `raw_data/train/` for train+val
-- `raw_data/test/` for the final hold-out set (optional)
-
-The importer accepts any of the following layouts:
-
-| # | Layout | What to do | Notes |
-|---|--------|------------|-------|
-| 1 | **CVAT YOLO export** | Drop the whole export folder (`data.yaml`, `images/`, `labels/`, `train.txt`). | `train.txt` is automatically parsed. |
-| 2 | **Standard YOLO** | Inside a subfolder create `images/` & `labels/`. | Class IDs will be remapped if needed. |
-| 3 | **Scene-based test sets** | One subfolder per scene, each with its own `images/` & `labels/`. | Scene name is appended to filenames so metrics stay separate. |
-| 4 | **Any folder containing `data.yaml` / `dataset.yaml`** | Copy it in. | Class IDs will be remapped by name matching if needed. |
-
-## Custom classes
-
-Configure custom classes in `params.yaml`:
-
-```yaml
-data:
-  custom_classes: [waste, cigarette]
-  use_coco_classes: false
-```
-
-When importing datasets that include a `data.yaml`, the pipeline can remap class IDs based on name matching.
-
-## Class mapping (merging classes)
-
-The class mapping feature allows you to **merge multiple classes into one** during training/evaluation without modifying your raw data.
-
-Example:
-
-```yaml
-data:
-  custom_classes: [waste, cigarette]
-  use_coco_classes: false
-  class_mapping:
-    waste: [waste, cigarette]
-```
-
-With this configuration:
-
-- Raw data remains unchanged in `raw_data/`
-- During dataset preparation, labels are remapped
-- The trained model sees only the merged target classes
-
-## Folder subsets (`prepare.folder_subsets`)
-
-You can limit or oversample specific source folders during dataset preparation.
-
-Example:
-
-```yaml
-prepare:
-  folder_subsets:
-    uavvaste: 0.5        # use 50% of images from this folder
-    taco: 0.2            # use 20%
-    cw32-08-07-train: 2  # 200% = oversample (training split only)
-```
-
-Behavior:
-
-- `0 < ratio < 1.0`: subsample a folder proportionally
-- `ratio > 1.0` (float): oversample a folder (applied to training split only)
-- `ratio >= 2` (int): treat as an **absolute count** (“use exactly N images”)
-
-CLI override (multiple allowed):
+Or run everything in one command:
 
 ```bash
-python -m object_detector_trainer.cli \
-  --stage prepare -d waste-detection \
-  --folder-subset uavvaste 0.5 \
-  --folder-subset cw32-08-07-train 2.0
+poetry run object-detector-trainer --stage all --workspace-root /path/to/workspace
 ```
 
-## Fine-tuning (YOLO)
+`--config` defaults to `params.yaml` inside the workspace root.
+Relative config paths are resolved from `--workspace-root`.
 
-Fine-tuning is supported for YOLO backends:
+## CLI Stages
 
-```yaml
-train:
-  finetune:
-    enabled: true
-    weights: models/finetune/best.pt
-    lr: 0.0001
-    epochs: 60
-    freeze_backbone: false
+- `bootstrap`: resolve or download pretrained assets for the selected model
+- `prepare`: build a YOLO-style dataset under `datasets/<dataset_name>/`
+- `train`: train the selected backend and write run artifacts under `runs/`
+- `evaluate`: evaluate the trained model and compare it against the configured baseline when available
+- `all`: run `bootstrap`, `prepare`, `train`, and `evaluate` in order
+
+Common overrides:
+
+- `--model <key>` to select a key from `models.*`
+- `--set key=value` for ad hoc config overrides
+- `--dataset-name <name>` to override `data.dataset_name`
+- `--val-split` and `--test-split` to adjust data splits
+- `--recreate-dataset` to rebuild `datasets/<dataset_name>/`
+- `--augment-multiplier` to increase dataset augmentation during preparation
+- `--folder-subset <folder> <ratio>` to override `prepare.folder_subsets`
+- `--all-models` to bootstrap every configured model instead of only the active one
+
+## Input Data
+
+Put source data under:
+
+- `raw_data/train/` for train and validation data
+- `raw_data/test/` for a holdout test set
+
+The importer accepts these source layouts:
+
+- Standard YOLO folders with `images/` and `labels/`
+- CVAT YOLO exports with `train.txt`
+- Scene-based folders inside `raw_data/test/`
+- Folders containing `data.yaml` so classes can be remapped by name
+
+Typical layout:
+
+```text
+raw_data/
+  train/
+    source_a/
+      images/
+      labels/
+  test/
+    source_b/
+      images/
+      labels/
+```
+
+## Configuration
+
+The trainer keeps its top-level configuration intentionally small:
+
+- `data` describes dataset naming and class strategy
+- `prepare` controls splits, augmentation, folder subsets, and optional auto-replay
+- `train` selects the model key and shared training defaults
+- `models` defines backend-specific model entries
+- `evaluation.baseline_weights_path` tells evaluation where a comparison baseline would live
+
+For larger model catalogs, use `models_defaults` to share backend-specific defaults such as `cache_dir` and `allow_download`.
+
+Keep project-specific experiment matrices and parameter-heavy workflows in consumer project repositories rather than here.
+
+For the exact validated config shape, see `object_detector_trainer/config/schema.py`.
+For backend-specific resolution logic, see `object_detector_trainer/backends/training_config.py`.
+
+### Baseline Behavior
+
+`evaluation.baseline_weights_path` must always be configured.
+
+Evaluation behaves like this:
+
+- If the baseline weights file is missing or empty and there is no nearby `metadata.yaml`, evaluation runs on the trained model only
+- If `metadata.yaml` exists next to the baseline path, the baseline is treated as promoted and the weights file must exist and be non-empty
+- Fine-tune weights and baseline weights are separate concerns
+
+This keeps the trainer usable in a fresh standalone workspace without forcing a baseline to exist on day one.
+
+## Outputs
+
+The trainer writes:
+
+- `datasets/<dataset_name>/` for prepared YOLO-style datasets
+- `runs/<run_name>/` for backend outputs, weights, plots, metadata, and evaluation artifacts
+- `runs/.last_train_result.json` so `evaluate` can reload the latest trained model
+- `metrics.json` for machine-readable metrics
+- `results_comparison/results.csv` and `results_comparison/results.txt` for summary comparison outputs
+
+## Backend Notes
+
+### YOLO
+
+- `models.<key>.asset_id` is the checkpoint filename, for example `yolo11n.pt`
+- Bootstrap stores checkpoints under `models/pretrained/yolo/` by default
+
+### RF-DETR
+
+- `models.<key>.variant` is required
+- `models.<key>.asset_id` is the checkpoint filename
+- Bootstrap stores checkpoints under `models/pretrained/rfdetr/` by default
+- The trainer adapts prepared datasets into the layout expected by RF-DETR during training
+
+### RTMDet
+
+- `models.<key>.asset_id` is the MMDetection config name, for example `rtmdet_m_8xb32-300e_coco`
+- Bootstrap stores configs and checkpoints under `models/pretrained/rtmdet/` by default
+- Training and evaluation use a temporary COCO export internally
+
+For reproducible offline RTMDet runs, you can predownload model assets:
+
+```bash
+poetry run mim download mmdet --config rtmdet_m_8xb32-300e_coco --dest models/pretrained/rtmdet
+```
+
+## Testing
+
+Fast test suite:
+
+```bash
+poetry run pytest
+```
+
+Heavy integration suite:
+
+```bash
+poetry run pytest object_detector_trainer/tests --heavy
 ```
 
 Notes:
 
-- Fine-tuning rejects missing or empty weight files.
-- The fine-tune weights path is consumer-project policy; it does not have to be the promoted evaluation baseline.
-- Evaluation compares against the configured baseline when it is available; it does not substitute fine-tune weights or alternate checkpoints.
+- Heavy tests run real backend training
+- The first heavy run may download pretrained assets into `models/pretrained/<backend>/`
+- Later heavy runs reuse that shared cache
+- If you add a new backend, also add a representative heavy-test model in `object_detector_trainer/tests/support/pipeline_test_utils.py`
 
-## Outputs
+## Code Map
 
-- Prepared datasets: `datasets/<dataset_name>/train` and `datasets/<dataset_name>/test`
-- Training runs: `runs/<run_name>/` for all backends, with `weights/best.pt`, `metadata.yaml`, `plots/`, run-level `results.csv`/`results.txt`, and evaluation artifacts
-- Metrics JSON: `metrics.json`
-- Results summary: `results_comparison/results.csv` and `results_comparison/results.txt` only
-- Persisted pointer for evaluate: `runs/.last_train_result.json`
-
-## Testing
-
-This repo includes:
-
-- Unit tests + E2E pipeline smoke tests using stubs (fast, default)
-- Opt-in heavy integration tests (real backend training; first run may download backend assets)
-
-This repository is installed with editable `pip`, not Poetry:
-
-Run:
-
-```bash
-python -m pip install -e ".[dev,rtmdet]"
-python -m pytest -q
-python -m pytest object_detector_trainer/tests -q --heavy
-```
-
-`pytest -m heavy` is not a valid substitute. The test suite requires the explicit `--heavy` flag. On the first heavy run, bootstrap may download the required model assets into `models/pretrained/`; later runs reuse that cache.
+- `object_detector_trainer/cli.py`: CLI entrypoint
+- `object_detector_trainer/pipeline/`: stage orchestration
+- `object_detector_trainer/backends/`: backend integrations
+- `object_detector_trainer/dataprep/`: raw-data ingestion and dataset building
+- `object_detector_trainer/evaluation/`: reports and metrics
+- `object_detector_trainer/config/`: schema, loading, and overrides
+- `object_detector_trainer/tests/`: trainer-level test suite

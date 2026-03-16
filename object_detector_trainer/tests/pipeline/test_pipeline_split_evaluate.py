@@ -20,16 +20,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
+from object_detector_trainer.backends.registry import supported_backend_names
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
 from object_detector_trainer.tests.support.pipeline_test_utils import (
-    BASE_PARAMS,
     build_args,
     create_baseline_artifact,
     create_local_yolo_checkpoint,
     create_minimal_dataset,
+    representative_model_key_for_backend,
     write_params_yaml,
 )
 from object_detector_trainer.tests.support.ultralytics_stub import StubYOLO
@@ -260,23 +260,9 @@ def _discover_non_yolo_backend_cases() -> dict[str, dict[str, object]]:
             f"Missing backends: {missing or 'none'}. Extra backends: {extra or 'none'}."
         )
 
-    models_cfg = BASE_PARAMS.get("models", {})
-    if not isinstance(models_cfg, dict):
-        raise RuntimeError("BASE_PARAMS.models must be a mapping.")
-
     model_by_backend: dict[str, str] = {}
-    for model_key, model_cfg in sorted(models_cfg.items()):
-        if not isinstance(model_cfg, dict):
-            continue
-        backend = normalize_backend_name(model_cfg["backend"])
-        if backend in expected_backends:
-            model_by_backend.setdefault(backend, str(model_key))
-
-    missing_models = sorted(expected_backends - set(model_by_backend))
-    if missing_models:
-        raise RuntimeError(
-            f"BASE_PARAMS is missing representative models for non-YOLO backends: {', '.join(missing_models)}"
-        )
+    for backend in sorted(expected_backends):
+        model_by_backend[backend] = representative_model_key_for_backend(backend)
 
     return {
         backend: {
@@ -375,12 +361,12 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
         workspace,
         {
             "data": {"dataset_name": dataset_name},
-            "train": {"model": "yolov8n"},
+            "train": {"model": representative_model_key_for_backend("yolo")},
             "evaluation": {"baseline_weights_path": str(baseline_a)},
         },
     )
     create_local_yolo_checkpoint(workspace)
-    args = build_args(dataset_name, {"model": "yolov8n"})
+    args = build_args(dataset_name, {"model": representative_model_key_for_backend("yolo")})
 
     run_prepare_stage(args)
 
@@ -412,7 +398,7 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
         workspace,
         {
             "data": {"dataset_name": dataset_name},
-            "train": {"model": "yolov8n"},
+            "train": {"model": representative_model_key_for_backend("yolo")},
             "evaluation": {"baseline_weights_path": str(baseline_b)},
         },
     )

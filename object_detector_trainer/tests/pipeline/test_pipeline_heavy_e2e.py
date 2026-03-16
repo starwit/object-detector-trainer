@@ -11,9 +11,7 @@ from pathlib import Path
 import pytest
 
 from object_detector_trainer.backends.registry import (
-    normalize_backend_name,
     require_bootstrapped_file,
-    supported_backend_names,
 )
 from object_detector_trainer.cli import _set_deterministic_seed
 from object_detector_trainer.pipeline.bootstrap_stage import run_bootstrap_stage
@@ -25,6 +23,9 @@ from object_detector_trainer.tests.support.pipeline_test_utils import (
     build_args,
     create_baseline_artifact,
     create_minimal_dataset,
+    representative_model_cases,
+    representative_model_config_for_backend,
+    representative_model_key_for_backend,
     repo_root,
     write_params_yaml,
 )
@@ -36,39 +37,29 @@ def _require_rtmdet_runtime() -> None:
     try:
         import mim  # noqa: F401
     except (ImportError, ModuleNotFoundError) as exc:
-        pytest.fail(f"openmim not installed; install openmim to run RTMDet heavy contract tests. ({exc})")
+        pytest.fail(
+            "RTMDet heavy tests require `openmim`. Install the RTMDet extra and verify "
+            f"`poetry run mim` works. ({exc})"
+        )
+
     try:
         import mmcv._ext  # type: ignore  # noqa: F401
     except (ImportError, ModuleNotFoundError, OSError) as exc:
         pytest.fail(
-            "RTMDet heavy contract prerequisite missing: full mmcv ops are unavailable "
-            f"(install `mmcv`, not `mmcv-lite`; got {exc})."
+            "RTMDet heavy tests require full compiled `mmcv` ops (`mmcv`, not `mmcv-lite`). "
+            "Install the RTMDet extra and verify `poetry run python -c \"import mmcv._ext\"` succeeds. "
+            f"({exc})"
         )
 
 
-def _discover_backend_cases() -> list[tuple[str, str]]:
-    models_cfg = BASE_PARAMS.get("models", {})
-    if not isinstance(models_cfg, dict):
-        return []
-
-    by_backend: dict[str, str] = {}
-    for model_key, model_cfg in sorted(models_cfg.items()):
-        if not isinstance(model_cfg, dict):
-            continue
-        backend = normalize_backend_name(model_cfg["backend"])
-        by_backend.setdefault(backend, str(model_key))
-
-    missing_backends = sorted(set(supported_backend_names()) - set(by_backend))
-    if missing_backends:
-        missing = ", ".join(missing_backends)
-        raise RuntimeError(f"BASE_PARAMS is missing representative models for backends: {missing}")
-
-    return sorted((backend, model_key) for backend, model_key in by_backend.items())
-
-
-BACKEND_CASES = _discover_backend_cases()
+BACKEND_CASES = [
+    (backend, model_key)
+    for model_key, backend in representative_model_cases()
+]
 if not BACKEND_CASES:
-    raise RuntimeError("Heavy backend contract setup failed: no backend cases discovered from BASE_PARAMS.")
+    raise RuntimeError(
+        "Heavy backend contract setup failed: no representative backend cases were discovered."
+    )
 
 
 def _shared_cache_dir(backend: str) -> Path:
@@ -76,7 +67,8 @@ def _shared_cache_dir(backend: str) -> Path:
 
 
 def _shared_yolo_checkpoint() -> Path:
-    return _shared_cache_dir("yolo") / "yolov8n.pt"
+    yolo_cfg = representative_model_config_for_backend("yolo")
+    return _shared_cache_dir("yolo") / str(yolo_cfg["asset_id"])
 
 
 def _assert_metrics_contract(workspace: Path) -> None:
@@ -162,12 +154,13 @@ def _write_backend_contract_params(
 
     models_payload: dict[str, object] = {model_key: model_cfg}
     if backend != "yolo":
-        yolo_cfg = copy.deepcopy(models_cfg.get("yolov8n", {}))
+        yolo_model_key = representative_model_key_for_backend("yolo")
+        yolo_cfg = copy.deepcopy(models_cfg.get(yolo_model_key, {}))
         if not isinstance(yolo_cfg, dict):
-            raise AssertionError("BASE_PARAMS.models.yolov8n must be a mapping.")
+            raise AssertionError(f"BASE_PARAMS.models.{yolo_model_key} must be a mapping.")
         yolo_cfg["allow_download"] = True
         yolo_cfg["cache_dir"] = str(_shared_cache_dir("yolo"))
-        models_payload["yolov8n"] = yolo_cfg
+        models_payload[yolo_model_key] = yolo_cfg
 
     baseline_path = create_baseline_artifact(
         workspace,
@@ -185,6 +178,11 @@ def _write_backend_contract_params(
                 "image_size": 128,
                 "epochs": 1,
                 "batch_size": 1,
+            },
+            "models_defaults": {
+                "yolo": {"cache_dir": str(_shared_cache_dir("yolo")), "allow_download": True},
+                "rfdetr": {"cache_dir": str(_shared_cache_dir("rfdetr")), "allow_download": True},
+                "rtmdet": {"cache_dir": str(_shared_cache_dir("rtmdet")), "allow_download": True},
             },
             "models": models_payload,
             "evaluation": {"baseline_weights_path": str(baseline_path)},

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
+from object_detector_trainer.backends.registry import normalize_backend_name
 from object_detector_trainer.cli import run_all_stages
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
@@ -18,7 +18,11 @@ from object_detector_trainer.tests.support.pipeline_test_utils import (
     BASE_PARAMS,
     create_baseline_artifact,
     create_local_yolo_checkpoint,
+    create_local_rfdetr_checkpoint,
+    create_local_rtmdet_assets,
     create_minimal_dataset,
+    representative_model_cases,
+    representative_model_key_for_backend,
     write_params_yaml,
 )
 from object_detector_trainer.tests.support.ultralytics_stub import StubYOLO
@@ -36,20 +40,7 @@ REQUIRED_METRIC_KEYS = (
 
 
 def _discover_backend_cases() -> list[tuple[str, str]]:
-    cases: dict[str, str] = {}
-    models_cfg = BASE_PARAMS.get("models", {})
-    if not isinstance(models_cfg, dict):
-        return []
-    for model_key, model_cfg in sorted(models_cfg.items()):
-        if not isinstance(model_cfg, dict):
-            continue
-        backend = normalize_backend_name(model_cfg["backend"])
-        cases.setdefault(backend, str(model_key))
-    missing_backends = sorted(set(supported_backend_names()) - set(cases))
-    if missing_backends:
-        missing = ", ".join(missing_backends)
-        raise RuntimeError(f"BASE_PARAMS is missing representative models for backends: {missing}")
-    return [(model_key, backend) for backend, model_key in sorted(cases.items())]
+    return representative_model_cases()
 
 
 class _ContractBox:
@@ -109,7 +100,7 @@ class _ContractModel:
 def _contract_args(
     *,
     dataset_name: str,
-    model: str = "yolov8n",
+    model: str = representative_model_key_for_backend("yolo"),
     stage: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -188,6 +179,15 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
     if not isinstance(source_model_cfg, dict):
         raise AssertionError(f"Unsupported model for test setup: {model}")
     model_cfg = dict(source_model_cfg)
+    backend = normalize_backend_name(model_cfg["backend"])
+
+    # Contract tests must stay deterministic and offline. Asset bootstrap is
+    # exercised, but downloads are replaced with locally provisioned stubs.
+    model_cfg["allow_download"] = False
+    defaults = BASE_PARAMS.get("models_defaults", {})
+    backend_defaults = defaults.get(backend, {}) if isinstance(defaults, dict) else {}
+    cache_dir = Path(str(backend_defaults.get("cache_dir", f"models/pretrained/{backend}")))
+    model_cfg["cache_dir"] = str(cache_dir)
 
     common = {
         "data": {"dataset_name": dataset_name},
@@ -197,12 +197,15 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
     }
 
     write_params_yaml(workspace, common)
-    if normalize_backend_name(model_cfg["backend"]) == "yolo":
-        defaults = BASE_PARAMS.get("models_defaults", {})
-        yolo_defaults = defaults.get("yolo", {}) if isinstance(defaults, dict) else {}
-        cache_dir = Path(str(yolo_defaults.get("cache_dir", "models/pretrained/yolo")))
-        checkpoint_path = cache_dir / str(model_cfg["asset_id"])
-        create_local_yolo_checkpoint(workspace, checkpoint_path=str(checkpoint_path))
+    asset_id = str(model_cfg.get("asset_id") or "").strip()
+    if backend == "yolo":
+        create_local_yolo_checkpoint(workspace, checkpoint_path=str(cache_dir / asset_id))
+    elif backend == "rfdetr":
+        create_local_rfdetr_checkpoint(workspace, checkpoint_path=str(cache_dir / asset_id))
+    elif backend == "rtmdet":
+        create_local_rtmdet_assets(workspace, cache_dir=str(cache_dir), config_name=asset_id)
+    else:
+        raise AssertionError(f"Unhandled backend for contract setup: {backend!r}")
 
 
 def _patch_lightweight_trainers(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
@@ -232,10 +235,11 @@ def test_stage_contract_prepare_train_evaluate_all(
     contract_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     create_minimal_dataset(contract_workspace)
-    _write_contract_params(contract_workspace, dataset_name="contract-stages", model="yolov8n")
+    yolo_model_key = representative_model_key_for_backend("yolo")
+    _write_contract_params(contract_workspace, dataset_name="contract-stages", model=yolo_model_key)
     _patch_lightweight_trainers(monkeypatch, contract_workspace)
 
-    args = _contract_args(dataset_name="contract-stages", model="yolov8n")
+    args = _contract_args(dataset_name="contract-stages", model=yolo_model_key)
     run_prepare_stage(args)
     assert (contract_workspace / "datasets" / "contract-stages").exists()
     assert not (contract_workspace / "results_comparison" / "results.csv").exists()
@@ -254,8 +258,8 @@ def test_stage_contract_prepare_train_evaluate_all(
 
     # all-stage flow should also satisfy the same contracts end-to-end
     create_minimal_dataset(contract_workspace)
-    _write_contract_params(contract_workspace, dataset_name="contract-all", model="yolov8n")
-    args_all = _contract_args(dataset_name="contract-all", model="yolov8n")
+    _write_contract_params(contract_workspace, dataset_name="contract-all", model=yolo_model_key)
+    args_all = _contract_args(dataset_name="contract-all", model=yolo_model_key)
     run_all_stages(args_all)
     assert (contract_workspace / ".tmp" / "bootstrap_manifest.json").exists()
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
