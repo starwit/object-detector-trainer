@@ -91,6 +91,21 @@ For the authoritative CLI surface, use `--help`. For the validated config shape 
 - `object_detector_trainer/config/schema.py`
 - `object_detector_trainer/backends/training_config.py`
 
+## Adding A Backend
+
+Backend-specific behavior should live in the backend module, not in the registry.
+To add a backend:
+
+1. Add a module under `object_detector_trainer/backends/`.
+2. Implement the backend surface documented in `object_detector_trainer/backends/registry.py`.
+3. Add the backend name/module and required resolved fields to `registry.py`.
+4. Add one representative test model in `object_detector_trainer/tests/support/pipeline_test_utils.py`.
+5. Add wrapper/evaluation support if the backend does not already expose YOLO-like predictions.
+
+The registry should stay a thin dispatch table. Asset download/bootstrap,
+backend-specific config defaults, training, reload metadata, and weight loading
+belong in the backend module.
+
 ## Testing
 
 Fast test suite:

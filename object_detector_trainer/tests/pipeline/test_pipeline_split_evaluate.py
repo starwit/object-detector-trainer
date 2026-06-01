@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from object_detector_trainer.backends.registry import supported_backend_names
+from object_detector_trainer.backends.registry import SUPPORTED_BACKEND_NAMES
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
@@ -251,7 +251,7 @@ _PATCHERS_BY_BACKEND = {
 
 
 def _discover_non_yolo_backend_cases() -> dict[str, dict[str, object]]:
-    expected_backends = {backend for backend in supported_backend_names() if backend != "yolo"}
+    expected_backends = {backend for backend in SUPPORTED_BACKEND_NAMES if backend != "yolo"}
     if expected_backends != set(_PATCHERS_BY_BACKEND):
         missing = sorted(expected_backends - set(_PATCHERS_BY_BACKEND))
         extra = sorted(set(_PATCHERS_BY_BACKEND) - expected_backends)

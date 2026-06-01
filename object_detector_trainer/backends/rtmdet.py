@@ -5,15 +5,127 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 import cv2
 import torch
 
+from object_detector_trainer.backends.assets import (
+    is_ready_file,
+    require_asset_id,
+    require_bootstrapped_file,
+    resolve_cache_dir,
+)
 from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
 from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
 
 logger = logging.getLogger(__name__)
+
+def resolve_config(
+    *,
+    model_key: str,
+    model_cfg: Mapping[str, Any],
+    shared_image_size: int,
+    shared_epochs: int,
+    shared_batch_size: int,
+    finetune_enabled: bool,
+    finetune_epochs: int | None,
+) -> dict[str, Any]:
+    config_name = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    cache_dir = resolve_cache_dir(backend="rtmdet", model_cfg=model_cfg)
+
+    batch_size = int(model_cfg.get("batch_size", shared_batch_size))
+    explicit_grad_accum = model_cfg.get("grad_accum_steps")
+    target_effective_batch = int(model_cfg.get("target_effective_batch", 32))
+    accum = (
+        int(explicit_grad_accum)
+        if explicit_grad_accum is not None
+        else max(1, target_effective_batch // batch_size)
+    )
+
+    explicit_lr = model_cfg.get("lr")
+    effective_bs = batch_size * accum
+    lr = float(explicit_lr) if explicit_lr is not None else 0.004 * effective_bs / 256
+
+    return {
+        "rtmdet_config_name": str(config_name),
+        "rtmdet_cache_dir": str(cache_dir),
+        "rtmdet_lr": lr,
+        "rtmdet_accum": accum,
+        "rtmdet_device": model_cfg.get("device"),
+        "rtmdet_cleanup_tmp": bool(model_cfg.get("cleanup_tmp", False)),
+    }
+
+
+def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
+    config_name = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    cache_dir = resolve_cache_dir(backend="rtmdet", model_cfg=model_cfg)
+
+    try:
+        resolved_cfg, resolved_ckpt, _ = _resolve_rtmdet_assets(
+            config_path=None,
+            checkpoint_path=None,
+            config_name=str(config_name),
+            cache_dir=cache_dir,
+        )
+        if is_ready_file(resolved_cfg) and is_ready_file(resolved_ckpt):
+            return resolved_cfg
+    except FileNotFoundError:
+        pass
+
+    if not bool(model_cfg.get("allow_download", True)):
+        raise FileNotFoundError(
+            f"models.{model_key} RTMDet assets are missing under {cache_dir} for config '{config_name}'. "
+        )
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [sys.executable, "-m", "mim", "download", "mmdet", "--config", config_name, "--dest", str(cache_dir)],
+        cwd=Path.cwd(),
+        check=True,
+    )
+    resolved_cfg, resolved_ckpt, _ = _resolve_rtmdet_assets(
+        config_path=None,
+        checkpoint_path=None,
+        config_name=str(config_name),
+        cache_dir=cache_dir,
+    )
+    require_bootstrapped_file(resolved_cfg, label=f"models.{model_key}.config")
+    require_bootstrapped_file(resolved_ckpt, label=f"models.{model_key}.checkpoint")
+    return resolved_cfg
+
+
+def build_reload_metadata(model: object, resolved_cfg: Mapping[str, Any]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    model_variant = getattr(model, "model_variant", None) or resolved_cfg.get("rtmdet_config_name")
+    if model_variant:
+        metadata["model_variant"] = str(model_variant)
+
+    for key, attr_name, cfg_key in (
+        ("model_config_path", "model_config_path", "model_config_path"),
+        ("rtmdet_config_name", "rtmdet_config_name", "rtmdet_config_name"),
+        ("rtmdet_cache_dir", "rtmdet_cache_dir", "rtmdet_cache_dir"),
+    ):
+        value = getattr(model, attr_name, None) or resolved_cfg.get(cfg_key)
+        if value:
+            metadata[key] = str(value)
+    return metadata
+
+
+def load_model_from_weights(
+    candidate_path: Path,
+    meta: Mapping[str, object],
+    display_name: str,
+    yolo_loader=None,
+) -> object:
+    return load_rtmdet_baseline(
+        weights_path=candidate_path,
+        metadata=dict(meta),
+        display_name=str(display_name),
+    )
 
 
 def _cleanup_mmengine_singletons() -> None:
@@ -658,6 +770,10 @@ def train_backend(
 
 
 __all__ = [
+    "bootstrap_assets",
+    "build_reload_metadata",
+    "load_model_from_weights",
+    "resolve_config",
     "train_backend",
     "train_rtmdet_backend",
     "load_rtmdet_baseline",

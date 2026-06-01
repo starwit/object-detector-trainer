@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping
 
 # Set matplotlib backend to non-GUI before any imports that might use it
 # This prevents "Cannot load backend 'tkagg'" errors on headless systems
@@ -9,6 +10,65 @@ import matplotlib
 matplotlib.use("Agg")
 
 import torch
+
+from object_detector_trainer.backends.assets import (
+    download_yolo_checkpoint,
+    is_ready_file,
+    require_asset_id,
+    require_bootstrapped_file,
+    resolve_cache_dir,
+)
+
+def resolve_config(
+    *,
+    model_key: str,
+    model_cfg: Mapping[str, Any],
+    shared_image_size: int,
+    shared_epochs: int,
+    shared_batch_size: int,
+    finetune_enabled: bool,
+    finetune_epochs: int | None,
+) -> dict[str, Any]:
+    asset_id = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    checkpoint_path = resolve_cache_dir(backend="yolo", model_cfg=model_cfg) / asset_id
+    resolved: dict[str, Any] = {"checkpoint": str(checkpoint_path)}
+    if finetune_enabled and finetune_epochs is not None:
+        resolved["epochs"] = int(finetune_epochs)
+    return resolved
+
+
+def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
+    asset_id = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    checkpoint = resolve_cache_dir(backend="yolo", model_cfg=model_cfg) / asset_id
+
+    if not is_ready_file(checkpoint):
+        if not bool(model_cfg.get("allow_download", True)):
+            raise FileNotFoundError(f"models.{model_key} YOLO checkpoint is missing: {checkpoint}.")
+        download_yolo_checkpoint(checkpoint)
+    return require_bootstrapped_file(checkpoint, label=f"models.{model_key}.checkpoint")
+
+
+def build_reload_metadata(model: object, resolved_cfg: Mapping[str, Any]) -> dict[str, object]:
+    return {}
+
+
+def load_model_from_weights(
+    candidate_path: Path,
+    meta: Mapping[str, object],
+    display_name: str,
+    yolo_loader,
+) -> object:
+    model_instance = yolo_loader(str(candidate_path))
+    setattr(model_instance, "model_backend", "yolo")
+    setattr(model_instance, "model_name", str(display_name))
+    if meta.get("model_variant"):
+        setattr(model_instance, "model_variant", str(meta["model_variant"]))
+    if meta.get("image_size") is not None:
+        setattr(model_instance, "resolution", int(meta["image_size"]))
+    class_names = meta.get("class_names")
+    if isinstance(class_names, dict) and class_names:
+        setattr(model_instance, "class_names", {int(k): str(v) for k, v in class_names.items()})
+    return model_instance
 
 
 def YOLO(*args, **kwargs):
@@ -229,4 +289,12 @@ def train_backend(
     )
 
 
-__all__ = ["train_backend", "train_model", "train_yolo"]
+__all__ = [
+    "bootstrap_assets",
+    "build_reload_metadata",
+    "load_model_from_weights",
+    "resolve_config",
+    "train_backend",
+    "train_model",
+    "train_yolo",
+]

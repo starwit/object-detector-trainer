@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from object_detector_trainer.backends.registry import (
-    normalize_backend_name,
+from object_detector_trainer.backends.assets import (
     resolve_workspace_path,
     require_bootstrapped_file,
+)
+from object_detector_trainer.backends.registry import (
+    normalize_backend_name,
     bootstrap_model_assets,
 )
 from object_detector_trainer.config.loader import load_config

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from object_detector_trainer.backends.registry import (
+from object_detector_trainer.backends.assets import (
     require_bootstrapped_file,
 )
 from object_detector_trainer.cli import _set_deterministic_seed

@@ -5,13 +5,120 @@ import errno
 import logging
 import shutil
 from pathlib import Path
+from typing import Any, Mapping
 
 import torch
 import yaml
 
+from object_detector_trainer.backends.assets import (
+    is_ready_file,
+    require_asset_id,
+    require_bootstrapped_file,
+    resolve_cache_dir,
+)
 from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
 
 logger = logging.getLogger(__name__)
+
+def resolve_config(
+    *,
+    model_key: str,
+    model_cfg: Mapping[str, Any],
+    shared_image_size: int,
+    shared_epochs: int,
+    shared_batch_size: int,
+    finetune_enabled: bool,
+    finetune_epochs: int | None,
+) -> dict[str, Any]:
+    variant = str(model_cfg.get("variant") or "").strip()
+    if not variant:
+        raise ValueError(
+            f"models.{model_key} (backend=rfdetr) must define variant explicitly."
+        )
+
+    asset_id = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    checkpoint_path = resolve_cache_dir(backend="rfdetr", model_cfg=model_cfg) / asset_id
+
+    batch_size = int(model_cfg.get("batch_size", shared_batch_size))
+    explicit_grad_accum = model_cfg.get("grad_accum_steps")
+    target_effective_batch = int(model_cfg.get("target_effective_batch", 16))
+    grad_accum = (
+        int(explicit_grad_accum)
+        if explicit_grad_accum is not None
+        else max(1, target_effective_batch // batch_size)
+    )
+
+    resolution = _normalize_rfdetr_resolution(
+        variant,
+        model_cfg.get("resolution", None),
+        int(model_cfg.get("image_size", shared_image_size)),
+    )
+
+    return {
+        "rfdetr_variant": variant,
+        "rfdetr_epochs": int(model_cfg.get("epochs", shared_epochs)),
+        "rfdetr_batch_size": batch_size,
+        "rfdetr_grad_accum": grad_accum,
+        "rfdetr_grad_accum_explicit": explicit_grad_accum is not None,
+        "rfdetr_target_effective_batch": target_effective_batch,
+        "rfdetr_resolution": int(resolution),
+        "rfdetr_lr": model_cfg.get("lr"),
+        "rfdetr_checkpoint": str(checkpoint_path),
+        "rfdetr_grad_ckpt": model_cfg.get("gradient_checkpointing"),
+        "rfdetr_extra": model_cfg.get("extra_train_kwargs"),
+    }
+
+
+def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
+    asset_id = require_asset_id(model_key=model_key, model_cfg=model_cfg)
+    checkpoint_path = resolve_cache_dir(backend="rfdetr", model_cfg=model_cfg) / asset_id
+
+    if not is_ready_file(checkpoint_path):
+        if not bool(model_cfg.get("allow_download", True)):
+            raise FileNotFoundError(
+                f"models.{model_key} RF-DETR checkpoint is missing: {checkpoint_path}."
+            )
+
+        from rfdetr.assets.model_weights import download_pretrain_weights
+
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.chdir(checkpoint_path.parent):
+            download_pretrain_weights(checkpoint_path.name)
+
+    return require_bootstrapped_file(
+        checkpoint_path,
+        label=f"models.{model_key}.checkpoint",
+    )
+
+
+def build_reload_metadata(model: object, resolved_cfg: Mapping[str, Any]) -> dict[str, object]:
+    model_variant = getattr(model, "model_variant", None) or resolved_cfg.get("rfdetr_variant")
+    return {"model_variant": str(model_variant)} if model_variant else {}
+
+
+def load_model_from_weights(
+    candidate_path: Path,
+    meta: Mapping[str, object],
+    display_name: str,
+    yolo_loader=None,
+) -> object:
+    from object_detector_trainer.wrappers.rfdetr import RFDETRModelAdapter
+
+    model_variant = str(meta.get("model_variant", "base")).strip().lower() or "base"
+    resolution = int(meta.get("image_size", 640) or 640)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rfdetr_model = _get_rfdetr_model(
+        model_variant=model_variant,
+        checkpoint_path=str(candidate_path),
+        device=device,
+        resolution=int(resolution),
+    )
+    return RFDETRModelAdapter(
+        rfdetr_model,
+        model_name=str(display_name),
+        resolution=int(resolution),
+        model_variant=model_variant,
+    )
 
 
 @contextlib.contextmanager
@@ -368,6 +475,10 @@ def train_backend(
 
 
 __all__ = [
+    "bootstrap_assets",
+    "build_reload_metadata",
+    "load_model_from_weights",
+    "resolve_config",
     "train_backend",
     "train_rfdetr_backend",
     "_get_rfdetr_model",

@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import yaml
 
-from object_detector_trainer.backends.registry import normalize_backend_name, supported_backend_names
+from object_detector_trainer.backends.registry import SUPPORTED_BACKEND_NAMES, normalize_backend_name
 
 
 # Canonical per-backend test models. The heavy/contract suites derive their
@@ -50,7 +50,7 @@ _REPRESENTATIVE_MODEL_SPECS_BY_BACKEND: Dict[str, tuple[str, Dict[str, Any]]] = 
 
 
 def _validated_representative_model_specs() -> Dict[str, tuple[str, Dict[str, Any]]]:
-    expected_backends = set(supported_backend_names())
+    expected_backends = set(SUPPORTED_BACKEND_NAMES)
     configured_backends = set(_REPRESENTATIVE_MODEL_SPECS_BY_BACKEND)
     if expected_backends != configured_backends:
         missing = sorted(expected_backends - configured_backends)

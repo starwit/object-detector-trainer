@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from object_detector_trainer.backends import registry
+from object_detector_trainer.backends import assets, registry
 
 
 def test_download_yolo_checkpoint_copies_into_requested_cache_path(
@@ -21,7 +21,7 @@ def test_download_yolo_checkpoint_copies_into_requested_cache_path(
     )
 
     target = tmp_path / "models" / "pretrained" / "yolo" / "yolov8n.pt"
-    result = registry._download_yolo_checkpoint(target)
+    result = assets.download_yolo_checkpoint(target)
 
     assert result == target
     assert target.exists()
@@ -50,7 +50,7 @@ def test_download_yolo_checkpoint_uses_ultralytics_default_release_resolution(
     )
 
     target = tmp_path / "models" / "pretrained" / "yolo" / "yolo11m.pt"
-    result = registry._download_yolo_checkpoint(target)
+    result = assets.download_yolo_checkpoint(target)
 
     assert result == target
     assert target.exists()

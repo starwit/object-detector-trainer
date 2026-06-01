@@ -1,3 +1,1 @@
-from object_detector_trainer.backends import rtmdet, rfdetr, yolo
-
-__all__ = ["rtmdet", "rfdetr", "yolo"]
+"""Backend implementations are imported lazily by ``backends.registry``."""
