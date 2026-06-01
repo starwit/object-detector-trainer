@@ -20,9 +20,14 @@ from object_detector_trainer.backends.assets import (
     resolve_cache_dir,
 )
 from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
-from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
+from object_detector_trainer.utils.path_ops import (
+    resolve_unique_run_dir,
+    resolve_workspace_path,
+    safe_dataset_dirname,
+)
 
 logger = logging.getLogger(__name__)
+
 
 def resolve_config(
     *,
@@ -64,26 +69,30 @@ def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
     config_name = require_asset_id(model_key=model_key, model_cfg=model_cfg)
     cache_dir = resolve_cache_dir(backend="rtmdet", model_cfg=model_cfg)
 
-    try:
-        resolved_cfg, resolved_ckpt, _ = _resolve_rtmdet_assets(
-            config_path=None,
-            checkpoint_path=None,
-            config_name=str(config_name),
-            cache_dir=cache_dir,
-        )
-        if is_ready_file(resolved_cfg) and is_ready_file(resolved_ckpt):
-            return resolved_cfg
-    except FileNotFoundError:
-        pass
+    resolved_cfg = cache_dir / f"{config_name}.py"
+    resolved_ckpt = _find_cached_rtmdet_checkpoint(cache_dir, config_name)
+    if is_ready_file(resolved_cfg) and is_ready_file(resolved_ckpt):
+        return resolved_cfg
 
     if not bool(model_cfg.get("allow_download", True)):
         raise FileNotFoundError(
-            f"models.{model_key} RTMDet assets are missing under {cache_dir} for config '{config_name}'. "
+            f"models.{model_key} RTMDet assets are missing under {cache_dir} "
+            f"for config '{config_name}'."
         )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        [sys.executable, "-m", "mim", "download", "mmdet", "--config", config_name, "--dest", str(cache_dir)],
+        [
+            sys.executable,
+            "-m",
+            "mim",
+            "download",
+            "mmdet",
+            "--config",
+            config_name,
+            "--dest",
+            str(cache_dir),
+        ],
         cwd=Path.cwd(),
         check=True,
     )
@@ -99,19 +108,19 @@ def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
 
 
 def build_reload_metadata(model: object, resolved_cfg: Mapping[str, Any]) -> dict[str, object]:
-    metadata: dict[str, object] = {}
-    model_variant = getattr(model, "model_variant", None) or resolved_cfg.get("rtmdet_config_name")
-    if model_variant:
-        metadata["model_variant"] = str(model_variant)
-
-    for key, attr_name, cfg_key in (
-        ("model_config_path", "model_config_path", "model_config_path"),
-        ("rtmdet_config_name", "rtmdet_config_name", "rtmdet_config_name"),
-        ("rtmdet_cache_dir", "rtmdet_cache_dir", "rtmdet_cache_dir"),
-    ):
-        value = getattr(model, attr_name, None) or resolved_cfg.get(cfg_key)
-        if value:
-            metadata[key] = str(value)
+    config_name = str(
+        getattr(model, "rtmdet_config_name", None) or resolved_cfg["rtmdet_config_name"]
+    )
+    metadata: dict[str, object] = {
+        "model_variant": str(getattr(model, "model_variant", None) or config_name),
+        "rtmdet_config_name": config_name,
+        "rtmdet_cache_dir": str(
+            getattr(model, "rtmdet_cache_dir", None) or resolved_cfg["rtmdet_cache_dir"]
+        ),
+    }
+    model_config_path = getattr(model, "model_config_path", None)
+    if model_config_path:
+        metadata["model_config_path"] = str(model_config_path)
     return metadata
 
 
@@ -150,7 +159,10 @@ def _cleanup_mmengine_singletons() -> None:
             try:
                 handler.close()
             except (OSError, RuntimeError, ValueError):
-                logger.debug("Ignoring expected RTMDet logger handler close failure.", exc_info=True)
+                logger.debug(
+                    "Ignoring expected RTMDet logger handler close failure.",
+                    exc_info=True,
+                )
             inst.removeHandler(handler)
     MMLogger._instance_dict.clear()
     MessageHub._instance_dict.clear()
@@ -248,7 +260,10 @@ def _yolo_split_to_coco(
     }
 
 
-def _prepare_rtmdet_coco_layout(training_path: Path, dataset_name: str) -> tuple[Path, dict[int, str]]:
+def _prepare_rtmdet_coco_layout(
+    training_path: Path,
+    dataset_name: str,
+) -> tuple[Path, dict[int, str]]:
     base_dir = Path(".tmp") / "rtmdet_datasets"
     output_dir = base_dir / safe_dataset_dirname(str(dataset_name))
     if not output_dir.resolve(strict=False).is_relative_to(base_dir.resolve(strict=False)):
@@ -285,36 +300,19 @@ def _prepare_rtmdet_coco_layout(training_path: Path, dataset_name: str) -> tuple
     return output_dir, class_names
 
 
-def _resolve_path(path_like: str | Path | None) -> Path | None:
-    if not path_like:
-        return None
-    path = Path(path_like).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path
-
-
 def _resolve_baseline_config_path(weights_path: Path, metadata: dict) -> Path | None:
-    adjacent_config = weights_path.parent / "model_config.py"
-    if adjacent_config.exists():
-        return adjacent_config
-
-    raw_config_path = metadata.get("model_config_path")
-    if not raw_config_path:
-        return None
-
-    raw_path = Path(str(raw_config_path)).expanduser()
-    candidates: list[Path] = []
-    if raw_path.is_absolute():
-        candidates.append(raw_path)
-    else:
-        candidates.append(weights_path.parent / raw_path)
-        candidates.append(Path.cwd() / raw_path)
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    for config_path in (
+        weights_path.parent / "model_config.py",
+        weights_path.parent.parent / "model_config.py",
+    ):
+        if config_path.exists():
+            return config_path
     return None
+
+
+def _find_cached_rtmdet_checkpoint(cache_root: Path, config_name: str) -> Path | None:
+    matches = sorted(path for path in cache_root.glob(f"{config_name}*.pth") if is_ready_file(path))
+    return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
 
 def _resolve_rtmdet_assets(
@@ -324,32 +322,33 @@ def _resolve_rtmdet_assets(
     config_name: str | None,
     cache_dir: str | Path | None,
 ) -> tuple[Path, Path | None, str]:
-    cfg_path = _resolve_path(config_path)
-    ckpt_path = _resolve_path(checkpoint_path)
-    cache_root = _resolve_path(cache_dir) or (Path.cwd() / "models" / "pretrained" / "rtmdet")
+    cfg_path = resolve_workspace_path(config_path)
+    ckpt_path = resolve_workspace_path(checkpoint_path)
+    cache_root = resolve_workspace_path(cache_dir) or (
+        Path.cwd() / "models" / "pretrained" / "rtmdet"
+    )
     variant = str(config_name or "").strip()
 
-    if cfg_path is not None and not cfg_path.exists():
-        raise FileNotFoundError(f"MMDetection config_path does not exist: {cfg_path}")
-    if ckpt_path is not None and not ckpt_path.exists():
-        raise FileNotFoundError(f"MMDetection checkpoint does not exist: {ckpt_path}")
+    if cfg_path is not None and not is_ready_file(cfg_path):
+        raise FileNotFoundError(
+            f"MMDetection config_path must point to an existing non-empty file: {cfg_path}"
+        )
+    if ckpt_path is not None and not is_ready_file(ckpt_path):
+        raise FileNotFoundError(
+            f"MMDetection checkpoint must point to an existing non-empty file: {ckpt_path}"
+        )
 
     if cfg_path is None:
         if not variant:
             raise ValueError("MMDetection backend needs either config_path or config_name.")
 
-        candidate = cache_root / f"{variant}.py"
-        if candidate.exists():
-            cfg_path = candidate
-        else:
-            matches = sorted(cache_root.glob(f"**/{variant}.py"))
-            if not matches:
-                raise FileNotFoundError(
-                    f"Could not find config '{variant}.py' under {cache_root}. "
-                    "Run the bootstrap stage (or `mim download mmdet --config <name> --dest <cache_dir>`) "
-                    "to provision pretrained RTMDet assets."
-                )
-            cfg_path = matches[-1]
+        cfg_path = cache_root / f"{variant}.py"
+        if not is_ready_file(cfg_path):
+            raise FileNotFoundError(
+                f"Could not find config '{variant}.py' under {cache_root}. "
+                "Run the bootstrap stage or "
+                "`mim download mmdet --config <name> --dest <cache_dir>`."
+            )
 
     if ckpt_path is None:
         if not variant:
@@ -358,14 +357,13 @@ def _resolve_rtmdet_assets(
                 "to locate a pretrained checkpoint."
             )
 
-        candidates = sorted(cache_root.glob(f"**/{variant}*.pth"))
-        if not candidates:
+        ckpt_path = _find_cached_rtmdet_checkpoint(cache_root, variant)
+        if ckpt_path is None:
             raise FileNotFoundError(
                 f"Could not find checkpoint '{variant}*.pth' under {cache_root}. "
-                "Run the bootstrap stage (or `mim download mmdet --config <name> --dest <cache_dir>`) "
-                "to provision pretrained RTMDet assets."
+                "Run the bootstrap stage or "
+                "`mim download mmdet --config <name> --dest <cache_dir>`."
             )
-        ckpt_path = max(candidates, key=lambda p: p.stat().st_mtime)
 
     resolved_variant = variant or cfg_path.stem
     return cfg_path, ckpt_path, resolved_variant
@@ -374,7 +372,11 @@ def _resolve_rtmdet_assets(
 def _patch_pipeline_scales(node, image_size: int) -> None:
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in {"scale", "img_scale", "crop_size", "size"} and isinstance(value, (list, tuple)) and len(value) == 2:
+            if (
+                key in {"scale", "img_scale", "crop_size", "size"}
+                and isinstance(value, (list, tuple))
+                and len(value) == 2
+            ):
                 node[key] = (int(image_size), int(image_size))
             else:
                 _patch_pipeline_scales(value, image_size)
@@ -400,7 +402,11 @@ def _fix_mosaic_pipeline_resize(node, image_size: int) -> None:
         if has_mosaic:
             for item in node:
                 if isinstance(item, dict) and item.get("type") == "RandomResize":
-                    if "scale" in item and isinstance(item["scale"], (list, tuple)) and len(item["scale"]) == 2:
+                    if (
+                        "scale" in item
+                        and isinstance(item["scale"], (list, tuple))
+                        and len(item["scale"]) == 2
+                    ):
                         item["scale"] = (int(image_size * 2), int(image_size * 2))
         for item in node:
             _fix_mosaic_pipeline_resize(item, image_size)
@@ -421,7 +427,14 @@ def _convert_syncbn_to_bn(node) -> None:
             _convert_syncbn_to_bn(item)
 
 
-def _configure_dataset(dataset_cfg: dict, *, data_root: Path, ann_file: str, img_prefix: str, classes: tuple[str, ...]) -> None:
+def _configure_dataset(
+    dataset_cfg: dict,
+    *,
+    data_root: Path,
+    ann_file: str,
+    img_prefix: str,
+    classes: tuple[str, ...],
+) -> None:
     if "dataset" in dataset_cfg and isinstance(dataset_cfg["dataset"], dict):
         _configure_dataset(
             dataset_cfg["dataset"],
@@ -454,7 +467,10 @@ def _set_num_classes(model_cfg: dict, num_classes: int) -> None:
     if isinstance(bbox_head, dict):
         if "num_classes" in bbox_head:
             bbox_head["num_classes"] = int(num_classes)
-        if isinstance(bbox_head.get("head_module"), dict) and "num_classes" in bbox_head["head_module"]:
+        if (
+            isinstance(bbox_head.get("head_module"), dict)
+            and "num_classes" in bbox_head["head_module"]
+        ):
             bbox_head["head_module"]["num_classes"] = int(num_classes)
     elif isinstance(bbox_head, list):
         for head in bbox_head:
@@ -462,7 +478,7 @@ def _set_num_classes(model_cfg: dict, num_classes: int) -> None:
                 head["num_classes"] = int(num_classes)
 
 
-def _find_best_checkpoint(run_dir: Path) -> Path | None:
+def _find_best_checkpoint(run_dir: Path) -> Path:
     best_candidates = sorted(run_dir.glob("best*.pth"))
     if best_candidates:
         return max(best_candidates, key=lambda p: p.stat().st_mtime)
@@ -471,10 +487,7 @@ def _find_best_checkpoint(run_dir: Path) -> Path | None:
     if latest.exists() and latest.stat().st_size > 0:
         return latest
 
-    epoch_candidates = sorted(run_dir.glob("epoch_*.pth"))
-    if epoch_candidates:
-        return max(epoch_candidates, key=lambda p: p.stat().st_mtime)
-    return None
+    raise FileNotFoundError(f"No best*.pth or latest.pth checkpoint found in {run_dir}")
 
 
 def _save_rtmdet_weights(output_dir: Path, source_ckpt: Path) -> Path:
@@ -489,26 +502,31 @@ def _save_rtmdet_weights(output_dir: Path, source_ckpt: Path) -> Path:
     return dest
 
 
+def _require_rtmdet_runtime() -> None:
+    try:
+        import mmcv._ext  # type: ignore  # noqa: F401
+    except (ImportError, ModuleNotFoundError, OSError) as e:
+        raise RuntimeError(
+            "RTMDet backend requires full mmcv ops. Install `mmcv` (not `mmcv-lite`) "
+            "matching your PyTorch/CUDA build."
+        ) from e
+
+
 def load_rtmdet_baseline(
     *,
     weights_path: Path,
     metadata: dict,
     display_name: str,
 ):
-    try:
-        import mmcv._ext  # type: ignore  # noqa: F401
-    except (ImportError, ModuleNotFoundError, OSError) as e:
-        raise RuntimeError(
-            "MMDetection baseline loading requires full mmcv ops. "
-            "Install `mmcv` (not `mmcv-lite`) matching your PyTorch/CUDA build."
-        ) from e
+    _require_rtmdet_runtime()
 
     config_path = _resolve_baseline_config_path(weights_path, metadata)
     if config_path is None:
         config_name = metadata.get("rtmdet_config_name")
         if not config_name:
             raise RuntimeError(
-                "MMDetection baseline metadata must include model_config_path or rtmdet_config_name."
+                "MMDetection baseline metadata must include rtmdet_config_name "
+                "when model_config.py is not packaged with the weights."
             )
         config_path, _unused_ckpt, _ = _resolve_rtmdet_assets(
             config_path=None,
@@ -517,13 +535,7 @@ def load_rtmdet_baseline(
             cache_dir=metadata.get("rtmdet_cache_dir"),
         )
 
-    try:
-        from mmdet.apis import init_detector
-    except (ImportError, ModuleNotFoundError, OSError) as e:
-        raise RuntimeError(
-            "MMDetection baseline loading failed. Ensure `mmdet` is installed and full `mmcv` "
-            "(not `mmcv-lite`) is available."
-        ) from e
+    from mmdet.apis import init_detector
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     detector = init_detector(str(config_path), str(weights_path), device=device)
@@ -547,7 +559,7 @@ def load_rtmdet_baseline(
     )
 
 
-def train_rtmdet_backend(
+def train_backend(
     *,
     training_path: Path,
     test_path: Path,
@@ -555,23 +567,10 @@ def train_rtmdet_backend(
     resolved_cfg: dict,
     experiment_name: str | None,
 ) -> tuple[object, Path, str, int, int]:
-    try:
-        import mmcv._ext  # type: ignore  # noqa: F401
-    except (ImportError, ModuleNotFoundError, OSError) as e:
-        raise RuntimeError(
-            "RTMDet backend requires full mmcv ops. Install `mmcv` (not `mmcv-lite`) "
-            "matching your PyTorch/CUDA build."
-        ) from e
-
-    try:
-        from mmengine.config import Config
-        from mmengine.runner import Runner
-        from mmdet.apis import init_detector
-    except (ImportError, ModuleNotFoundError, OSError) as e:
-        raise RuntimeError(
-            "RTMDet backend requires `mmdet`, `mmengine`, and full `mmcv` "
-            "(not `mmcv-lite`)."
-        ) from e
+    _require_rtmdet_runtime()
+    from mmengine.config import Config
+    from mmengine.runner import Runner
+    from mmdet.apis import init_detector
 
     from object_detector_trainer.wrappers.rtmdet import RTMDetModelAdapter
 
@@ -710,7 +709,8 @@ def train_rtmdet_backend(
     runner = Runner.from_cfg(cfg)
     # mmengine 0.10.x predates the PyTorch 2.6 weights_only=True default and
     # calls torch.load without that argument.  Override for the training call.
-    _orig_load, torch.load = torch.load, lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+    _orig_load = torch.load
+    torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
     try:
         runner.train()
     finally:
@@ -723,17 +723,17 @@ def train_rtmdet_backend(
     _cleanup_mmengine_singletons()
     gc.collect()
 
-    best_ckpt = _find_best_checkpoint(output_dir)
-    if best_ckpt is None:
-        raise FileNotFoundError(f"No MMDetection checkpoint found in {output_dir}")
-    best_weights = _save_rtmdet_weights(output_dir, best_ckpt)
+    best_weights = _save_rtmdet_weights(output_dir, _find_best_checkpoint(output_dir))
 
     local_config = output_dir / "model_config.py"
     cfg.dump(str(local_config))
 
     display_name = f"{run_name}-rtmdet"
     class_names_map, _ = get_dataset_classes(test_path / "dataset.yaml")
-    device = str(resolved_cfg.get("rtmdet_device") or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    device = str(
+        resolved_cfg.get("rtmdet_device")
+        or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    )
     detector = init_detector(str(local_config), str(best_weights), device=device)
     model = RTMDetModelAdapter(
         detector,
@@ -749,23 +749,12 @@ def train_rtmdet_backend(
     if bool(resolved_cfg.get("rtmdet_cleanup_tmp", False)):
         shutil.rmtree(dataset_dir, ignore_errors=True)
 
-    return model, output_dir, display_name, int(resolved_cfg["image_size"]), int(resolved_cfg["epochs"])
-
-
-def train_backend(
-    *,
-    training_path: Path,
-    test_path: Path,
-    dataset_name: str,
-    resolved_cfg: dict,
-    experiment_name: str | None,
-) -> tuple[object, Path, str, int, int]:
-    return train_rtmdet_backend(
-        training_path=training_path,
-        test_path=test_path,
-        dataset_name=dataset_name,
-        resolved_cfg=resolved_cfg,
-        experiment_name=experiment_name,
+    return (
+        model,
+        output_dir,
+        display_name,
+        int(resolved_cfg["image_size"]),
+        int(resolved_cfg["epochs"]),
     )
 
 
@@ -775,6 +764,5 @@ __all__ = [
     "load_model_from_weights",
     "resolve_config",
     "train_backend",
-    "train_rtmdet_backend",
     "load_rtmdet_baseline",
 ]

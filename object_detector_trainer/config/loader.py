@@ -9,10 +9,6 @@ from object_detector_trainer.config.overrides import apply_set_overrides
 from object_detector_trainer.config.schema import AppConfig
 
 
-def _as_mapping(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = dict(base)
     for key, value in overlay.items():
@@ -23,37 +19,27 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
-def _normalize_backend_key(value: Any) -> str:
-    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
-
-
 def _apply_models_defaults(raw_config: dict[str, Any]) -> dict[str, Any]:
-    defaults_by_backend = _as_mapping(raw_config.get("models_defaults"))
-    if not defaults_by_backend:
+    defaults_by_backend = raw_config.get("models_defaults") or {}
+    models_cfg = raw_config.get("models") or {}
+    if not defaults_by_backend or not models_cfg:
         return raw_config
 
-    models_cfg = raw_config.get("models")
-    if not isinstance(models_cfg, dict) or not models_cfg:
-        return raw_config
-
-    global_defaults = _as_mapping(defaults_by_backend.get("*"))
+    global_defaults = defaults_by_backend.get("*") or {}
 
     merged_models: dict[str, Any] = {}
-    for model_key, model_cfg_raw in models_cfg.items():
-        if not isinstance(model_cfg_raw, dict):
-            merged_models[str(model_key)] = model_cfg_raw
-            continue
-
-        backend_raw = model_cfg_raw.get("backend")
-        if backend_raw is None:
-            merged_models[str(model_key)] = model_cfg_raw
-            continue
-
-        backend_key = _normalize_backend_key(backend_raw)
-        backend_defaults = _as_mapping(defaults_by_backend.get(backend_key))
-        combined_defaults = _deep_merge(global_defaults, backend_defaults) if global_defaults else backend_defaults
+    for model_key, model_cfg in models_cfg.items():
+        backend = str(model_cfg.get("backend", "")).strip().lower()
+        backend_defaults = defaults_by_backend.get(backend) or {}
+        combined_defaults = (
+            _deep_merge(global_defaults, backend_defaults)
+            if global_defaults
+            else backend_defaults
+        )
         merged_models[str(model_key)] = (
-            _deep_merge(combined_defaults, model_cfg_raw) if combined_defaults else model_cfg_raw
+            _deep_merge(combined_defaults, model_cfg)
+            if combined_defaults
+            else model_cfg
         )
 
     merged = dict(raw_config)
@@ -63,9 +49,9 @@ def _apply_models_defaults(raw_config: dict[str, Any]) -> dict[str, Any]:
 
 def _apply_direct_arg_overrides(raw_config: dict[str, Any], args) -> dict[str, Any]:
     merged = dict(raw_config)
-    data_cfg = dict(_as_mapping(merged.get("data", {})))
-    train_cfg = dict(_as_mapping(merged.get("train", {})))
-    prepare_cfg = dict(_as_mapping(merged.get("prepare", {})))
+    data_cfg = dict(merged.get("data") or {})
+    train_cfg = dict(merged.get("train") or {})
+    prepare_cfg = dict(merged.get("prepare") or {})
 
     dataset_name = getattr(args, "dataset_name", None)
     if dataset_name:

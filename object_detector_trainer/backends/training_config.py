@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
-
 from object_detector_trainer.backends.registry import (
     normalize_backend_name,
     resolve_backend_config,
 )
 from object_detector_trainer.config.schema import AppConfig
 
-
-def _as_mapping(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
 
 def resolve_training_config(args, config: AppConfig) -> dict:
     train_cfg = config.train.model_dump()
@@ -23,7 +18,7 @@ def resolve_training_config(args, config: AppConfig) -> dict:
         available = ", ".join(sorted(models_cfg.keys())) or "<none>"
         raise ValueError(f"Unknown model key '{selected_model}'. Available models: {available}")
 
-    model_cfg = _as_mapping(models_cfg.get(selected_model, {}))
+    model_cfg = models_cfg[selected_model]
     backend_raw = model_cfg.get("backend")
     if backend_raw is None:
         raise ValueError(f"models.{selected_model} must define backend explicitly.")
@@ -32,7 +27,7 @@ def resolve_training_config(args, config: AppConfig) -> dict:
     shared_epochs = int(train_cfg.get("epochs", 100))
     shared_batch_size = int(train_cfg.get("batch_size", 8))
 
-    finetune_cfg = _as_mapping(train_cfg.get("finetune", {}))
+    finetune_cfg = train_cfg.get("finetune", {})
     finetune_enabled = bool(finetune_cfg.get("enabled", False))
     finetune_weights = finetune_cfg.get("weights")
     finetune_lr = finetune_cfg.get("lr")

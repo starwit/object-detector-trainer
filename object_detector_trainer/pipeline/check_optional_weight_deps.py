@@ -16,17 +16,9 @@ behavior.
 """
 
 from pathlib import Path
-from typing import Any
-
 import yaml
 
-
-def _resolve_optional_path(workspace_root: Path, raw: Any) -> Path | None:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    candidate = Path(text).expanduser()
-    return candidate if candidate.is_absolute() else (workspace_root / candidate)
+from object_detector_trainer.utils.path_ops import resolve_workspace_path
 
 
 def ensure_optional_weight_placeholders(workspace_root: Path) -> list[Path]:
@@ -40,23 +32,10 @@ def ensure_optional_weight_placeholders(workspace_root: Path) -> list[Path]:
     if not params_file.exists():
         return []
 
-    try:
-        params = yaml.safe_load(params_file.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return []
-    if not isinstance(params, dict):
-        return []
-
-    train_cfg = params.get("train") or {}
-    if not isinstance(train_cfg, dict):
-        train_cfg = {}
-    finetune_cfg = train_cfg.get("finetune") or {}
-    if not isinstance(finetune_cfg, dict):
-        finetune_cfg = {}
-
-    eval_cfg = params.get("evaluation") or {}
-    if not isinstance(eval_cfg, dict):
-        eval_cfg = {}
+    params = yaml.safe_load(params_file.read_text(encoding="utf-8")) or {}
+    train_cfg = params.get("train", {})
+    finetune_cfg = train_cfg.get("finetune", {})
+    eval_cfg = params.get("evaluation", {})
 
     raw_paths = (
         eval_cfg.get("baseline_weights_path"),
@@ -66,7 +45,7 @@ def ensure_optional_weight_placeholders(workspace_root: Path) -> list[Path]:
     created: list[Path] = []
     seen: set[Path] = set()
     for raw_path in raw_paths:
-        path = _resolve_optional_path(workspace_root, raw_path)
+        path = resolve_workspace_path(raw_path, root=workspace_root)
         if path is None:
             continue
         if path in seen:
@@ -94,4 +73,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

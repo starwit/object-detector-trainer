@@ -22,6 +22,11 @@ from object_detector_trainer.backends.registry import (
     load_backend_model_from_weights,
     normalize_backend_name,
 )
+from object_detector_trainer.utils.path_ops import resolve_workspace_path
+
+
+RUNS_ROOT = Path("runs")
+LAST_TRAIN_RESULT_PATH = RUNS_ROOT / ".last_train_result.json"
 
 
 @dataclass
@@ -34,14 +39,6 @@ class PersistedTrainResult:
     test_path: Path
     best_weights_path: Path
     reload_metadata: dict[str, Any]
-
-
-def _runs_root() -> Path:
-    return Path("runs")
-
-
-def _last_train_result_path() -> Path:
-    return _runs_root() / ".last_train_result.json"
 
 
 def _load_yolo_model(*args: Any, **kwargs: Any) -> Any:
@@ -71,90 +68,13 @@ def persist_train_result(
         "best_weights_path": str(train_output_dir / "weights" / "best.pt"),
         "reload_metadata": reload_metadata,
     }
-    runs_dir = _runs_root()
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    with _last_train_result_path().open("w", encoding="utf-8") as f:
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    with LAST_TRAIN_RESULT_PATH.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
 
-def _normalize_candidate_path(path_candidate: str | Path | None) -> Path | None:
-    if not path_candidate:
-        return None
-    candidate_path = Path(path_candidate).expanduser()
-    if not candidate_path.is_absolute():
-        candidate_path = Path.cwd() / candidate_path
-    return candidate_path
-
-
-def _weight_candidate_status(path_candidate: str | Path | None) -> tuple[Path | None, str]:
-    candidate_path = _normalize_candidate_path(path_candidate)
-    if candidate_path is None:
-        return None, "not configured"
-    if not candidate_path.exists():
-        return candidate_path, f"missing file: {candidate_path}"
-    if candidate_path.stat().st_size == 0:
-        return candidate_path, f"empty file: {candidate_path}"
-    return candidate_path, "ready"
-
-
-def _require_ready_weight(path_candidate: str | Path | None, *, label: str) -> Path:
-    candidate_path, status = _weight_candidate_status(path_candidate)
-    if status == "ready" and candidate_path is not None:
-        return candidate_path
-    raise FileNotFoundError(f"{label} must point to an existing non-empty file ({status}).")
-
-
-def _normalize_persisted_payload(path: Path, payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"Invalid persisted train result at {path}: expected JSON object, got {type(payload)}."
-        )
-
-    required_keys = (
-        "train_output_dir",
-        "experiment_name",
-        "image_size",
-        "train_epochs",
-        "training_path",
-        "test_path",
-        "best_weights_path",
-    )
-    missing = [k for k in required_keys if k not in payload]
-    if missing:
-        raise ValueError(
-            f"Invalid persisted train result at {path}: missing keys {', '.join(missing)}."
-        )
-
-    for key in ("train_output_dir", "experiment_name", "training_path", "test_path", "best_weights_path"):
-        if not isinstance(payload.get(key), str):
-            raise ValueError(
-                f"Invalid persisted train result at {path}: key '{key}' must be a string."
-            )
-
-    for key in ("image_size", "train_epochs"):
-        if not isinstance(payload.get(key), int):
-            raise ValueError(
-                f"Invalid persisted train result at {path}: key '{key}' must be an integer."
-            )
-
-    reload_metadata = payload.get("reload_metadata", {})
-    if not isinstance(reload_metadata, dict):
-        reload_metadata = {}
-
-    return {
-        "train_output_dir": payload["train_output_dir"],
-        "experiment_name": payload["experiment_name"],
-        "image_size": payload["image_size"],
-        "train_epochs": payload["train_epochs"],
-        "training_path": payload["training_path"],
-        "test_path": payload["test_path"],
-        "best_weights_path": payload["best_weights_path"],
-        "reload_metadata": reload_metadata,
-    }
-
-
 def load_persisted_train_result() -> PersistedTrainResult:
-    path = _last_train_result_path()
+    path = LAST_TRAIN_RESULT_PATH
     if not path.exists():
         raise FileNotFoundError(
             f"No persisted train result found at {path}. "
@@ -163,16 +83,15 @@ def load_persisted_train_result() -> PersistedTrainResult:
     with path.open("r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    normalized = _normalize_persisted_payload(path, payload)
     return PersistedTrainResult(
-        train_output_dir=Path(normalized["train_output_dir"]),
-        experiment_name=str(normalized["experiment_name"]),
-        image_size=int(normalized["image_size"]),
-        train_epochs=int(normalized["train_epochs"]),
-        training_path=Path(normalized["training_path"]),
-        test_path=Path(normalized["test_path"]),
-        best_weights_path=Path(normalized["best_weights_path"]),
-        reload_metadata=normalized["reload_metadata"],
+        train_output_dir=Path(payload["train_output_dir"]),
+        experiment_name=str(payload["experiment_name"]),
+        image_size=int(payload["image_size"]),
+        train_epochs=int(payload["train_epochs"]),
+        training_path=Path(payload["training_path"]),
+        test_path=Path(payload["test_path"]),
+        best_weights_path=Path(payload["best_weights_path"]),
+        reload_metadata=dict(payload.get("reload_metadata") or {}),
     )
 
 
@@ -180,7 +99,13 @@ def load_model_from_weights(
     path_candidate: str | Path | None,
     metadata_override: dict[str, object] | None = None,
 ) -> tuple[object, str]:
-    candidate_path = _require_ready_weight(path_candidate, label="Model weights")
+    candidate_path = resolve_workspace_path(path_candidate)
+    if candidate_path is None:
+        raise FileNotFoundError("Model weights are not configured.")
+    if not candidate_path.is_file() or candidate_path.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"Model weights must point to an existing non-empty file: {candidate_path}"
+        )
 
     meta: dict[str, object] = {}
     for meta_path in (
@@ -194,7 +119,7 @@ def load_model_from_weights(
         if isinstance(parsed, dict):
             meta.update(parsed)
             break
-    if isinstance(metadata_override, dict):
+    if metadata_override:
         meta.update(metadata_override)
     if not meta:
         raise FileNotFoundError(
@@ -228,11 +153,7 @@ def load_model_from_weights(
 def resolve_baseline_model(
     baseline_weights_path: str | None,
 ) -> tuple[object, str]:
-    baseline_candidate = _require_ready_weight(
-        baseline_weights_path,
-        label="evaluation.baseline_weights_path",
-    )
-    baseline_model, baseline_display_name = load_model_from_weights(baseline_candidate)
+    baseline_model, baseline_display_name = load_model_from_weights(baseline_weights_path)
     return baseline_model, (baseline_display_name or "baseline")
 
 

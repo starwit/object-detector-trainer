@@ -4,16 +4,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Mapping
 
-from object_detector_trainer.utils.path_ops import link_or_copy
-
-
-def resolve_workspace_path(raw_path: str | Path | None) -> Path | None:
-    if not raw_path:
-        return None
-    candidate = Path(raw_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    return candidate
+from object_detector_trainer.utils.path_ops import link_or_copy, resolve_workspace_path
 
 
 def resolve_cache_dir(*, backend: str, model_cfg: Mapping[str, Any]) -> Path:
@@ -29,7 +20,7 @@ def require_asset_id(*, model_key: str, model_cfg: Mapping[str, Any]) -> str:
 
 
 def is_ready_file(path: Path | None) -> bool:
-    return path is not None and path.exists() and path.stat().st_size > 0
+    return path is not None and path.is_file() and path.stat().st_size > 0
 
 
 def require_bootstrapped_file(path: Path | None, *, label: str) -> Path:
@@ -42,16 +33,17 @@ def download_yolo_checkpoint(checkpoint_path: Path) -> Path:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     from ultralytics.utils.downloads import attempt_download_asset
 
-    downloaded_path = Path(
+    downloaded_path = resolve_workspace_path(
         attempt_download_asset(checkpoint_path.name, repo="ultralytics/assets")
-    ).expanduser()
-    if not downloaded_path.is_absolute():
-        downloaded_path = Path.cwd() / downloaded_path
-    require_bootstrapped_file(downloaded_path, label="Downloaded YOLO checkpoint")
+    )
+    downloaded_path = require_bootstrapped_file(downloaded_path, label="Downloaded YOLO checkpoint")
     if downloaded_path.resolve() != checkpoint_path.resolve():
         link_or_copy(downloaded_path, checkpoint_path, prefer_hardlink=False)
     require_bootstrapped_file(checkpoint_path, label="YOLO checkpoint")
-    if downloaded_path.resolve() != checkpoint_path.resolve() and downloaded_path.parent == Path.cwd():
+    if (
+        downloaded_path.resolve() != checkpoint_path.resolve()
+        and downloaded_path.parent == Path.cwd()
+    ):
         with suppress(FileNotFoundError):
             downloaded_path.unlink()
     return checkpoint_path

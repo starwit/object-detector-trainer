@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import errno
-import logging
 import shutil
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,9 +14,12 @@ from object_detector_trainer.backends.assets import (
     require_bootstrapped_file,
     resolve_cache_dir,
 )
-from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, safe_dataset_dirname
+from object_detector_trainer.utils.path_ops import (
+    resolve_unique_run_dir,
+    resolve_workspace_path,
+    safe_dataset_dirname,
+)
 
-logger = logging.getLogger(__name__)
 
 def resolve_config(
     *,
@@ -92,8 +93,11 @@ def bootstrap_assets(model_key: str, model_cfg: Mapping[str, Any]) -> Path:
 
 
 def build_reload_metadata(model: object, resolved_cfg: Mapping[str, Any]) -> dict[str, object]:
-    model_variant = getattr(model, "model_variant", None) or resolved_cfg.get("rfdetr_variant")
-    return {"model_variant": str(model_variant)} if model_variant else {}
+    return {
+        "model_variant": str(
+            getattr(model, "model_variant", None) or resolved_cfg["rfdetr_variant"]
+        )
+    }
 
 
 def load_model_from_weights(
@@ -104,8 +108,10 @@ def load_model_from_weights(
 ) -> object:
     from object_detector_trainer.wrappers.rfdetr import RFDETRModelAdapter
 
-    model_variant = str(meta.get("model_variant", "base")).strip().lower() or "base"
-    resolution = int(meta.get("image_size", 640) or 640)
+    model_variant = str(meta.get("model_variant") or "").strip().lower()
+    if not model_variant:
+        raise ValueError("RF-DETR model metadata must include model_variant.")
+    resolution = int(meta["image_size"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
     rfdetr_model = _get_rfdetr_model(
         model_variant=model_variant,
@@ -139,19 +145,23 @@ def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
     import rfdetr.main as rfdetr_main
     from rfdetr.util.utils import BestMetricHolder as OriginalBestMetricHolder
 
-    original_symbol = getattr(rfdetr_main, "BestMetricHolder", None)
+    original_symbol = rfdetr_main.BestMetricHolder
     patched_init_res = float(init_res)
 
     class PatchedBestMetricHolder(OriginalBestMetricHolder):  # type: ignore[misc]
-        def __init__(self, init_res: float = patched_init_res, better: str = "large", use_ema: bool = False) -> None:
+        def __init__(
+            self,
+            init_res: float = patched_init_res,
+            better: str = "large",
+            use_ema: bool = False,
+        ) -> None:
             super().__init__(init_res=init_res, better=better, use_ema=use_ema)
 
     rfdetr_main.BestMetricHolder = PatchedBestMetricHolder  # type: ignore[assignment]
     try:
         yield
     finally:
-        if original_symbol is not None:
-            rfdetr_main.BestMetricHolder = original_symbol  # type: ignore[assignment]
+        rfdetr_main.BestMetricHolder = original_symbol  # type: ignore[assignment]
 
 
 def _resolve_required_checkpoint(path_like: str | Path | None) -> Path:
@@ -160,36 +170,30 @@ def _resolve_required_checkpoint(path_like: str | Path | None) -> Path:
             "RF-DETR training requires a resolved local checkpoint path. "
             "Run bootstrap first or check models.<key>.asset_id / cache_dir."
         )
-    candidate = Path(path_like).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    if not candidate.exists():
-        raise FileNotFoundError(f"Resolved RF-DETR checkpoint does not exist: {candidate}")
-    if candidate.stat().st_size == 0:
-        raise FileNotFoundError(f"Resolved RF-DETR checkpoint is empty: {candidate}")
-    return candidate
+    checkpoint = resolve_workspace_path(path_like)
+    return require_bootstrapped_file(checkpoint, label="Resolved RF-DETR checkpoint")
 
 
-def _rfdetr_resolution_divisor(model_variant: str) -> int:
-    """
-    RF-DETR requires resolution divisible by (patch_size * num_windows).
-    For the official variants:
-      - nano/small/medium: 16 * 2 = 32
-      - base/large: 14 * 4 = 56
-    """
-    variant = (model_variant or "").lower()
-    if variant in {"nano", "small", "medium"}:
-        return 32
-    if variant in {"base", "large"}:
-        return 56
-    return 56
+def _normalize_rfdetr_resolution(
+    model_variant: str,
+    resolution: int | None,
+    shared_image_size: int,
+) -> int:
+    """Adjust resolution to RF-DETR's official patch/window divisors."""
+    divisors = {
+        "nano": 32,
+        "small": 32,
+        "medium": 32,
+        "base": 56,
+        "large": 56,
+    }
+    variant = model_variant.lower()
+    if variant not in divisors:
+        raise ValueError(f"Unsupported RF-DETR model variant: {model_variant}")
 
-
-def _normalize_rfdetr_resolution(model_variant: str, resolution: int | None, fallback: int) -> int:
-    """Adjust resolution to satisfy RF-DETR constraints."""
     if resolution is None:
-        resolution = int(fallback)
-    divisor = _rfdetr_resolution_divisor(model_variant)
+        resolution = int(shared_image_size)
+    divisor = divisors[variant]
     if resolution % divisor != 0:
         adjusted = (resolution // divisor) * divisor
         if adjusted < divisor:
@@ -201,6 +205,7 @@ def _normalize_rfdetr_resolution(model_variant: str, resolution: int | None, fal
         resolution = adjusted
     return int(resolution)
 
+
 def _get_rfdetr_model(
     model_variant: str,
     checkpoint_path: str | None = None,
@@ -211,7 +216,7 @@ def _get_rfdetr_model(
     """Return an initialized RF-DETR model based on a variant name."""
     import rfdetr
 
-    variant = (model_variant or "base").lower()
+    variant = model_variant.lower()
     class_name_by_variant = {
         "nano": "RFDETRNano",
         "small": "RFDETRSmall",
@@ -223,12 +228,7 @@ def _get_rfdetr_model(
     if class_name is None:
         raise ValueError(f"Unsupported RF-DETR model variant: {model_variant}")
 
-    model_cls = getattr(rfdetr, class_name, None)
-    if model_cls is None:
-        raise RuntimeError(
-            f"Your installed rfdetr package does not provide {class_name}. "
-            "Either choose another train.rfdetr.model or upgrade rfdetr."
-        )
+    model_cls = getattr(rfdetr, class_name)
 
     init_kwargs: dict[str, object] = {}
     if checkpoint_path:
@@ -366,7 +366,7 @@ def _prepare_rfdetr_yolo_layout(training_path: Path, test_path: Path, dataset_na
     return output_dir
 
 
-def train_rfdetr_backend(
+def train_backend(
     *,
     training_path: Path,
     test_path: Path,
@@ -386,7 +386,8 @@ def train_rfdetr_backend(
     if not resolved_cfg.get("rfdetr_grad_accum_explicit", False):
         print(
             f"RF-DETR: auto-computed grad_accum_steps={rfdetr_grad_accum} "
-            f"(target_effective_batch={resolved_cfg['rfdetr_target_effective_batch']} / batch_size={rfdetr_batch_size})"
+            f"(target_effective_batch={resolved_cfg['rfdetr_target_effective_batch']} / "
+            f"batch_size={rfdetr_batch_size})"
         )
 
     rfdetr_lr = resolved_cfg.get("rfdetr_lr")
@@ -423,14 +424,11 @@ def train_rfdetr_backend(
         extra_train_kwargs=rfdetr_extra if isinstance(rfdetr_extra, dict) else None,
     )
 
-    # ── Save weights in the same layout as YOLO (weights/best.pt) ──
     _save_rfdetr_weights(train_output_dir)
 
-    # ── Read class names from the dataset for the adapter ──
     test_yaml = test_path / "dataset.yaml"
     class_names_map, _ = get_dataset_classes(test_yaml)
 
-    # ── Wrap in adapter so evaluate.py treats it like a YOLO model ──
     model = RFDETRModelAdapter(
         rfdetr_model,
         model_name=display_name,
@@ -439,39 +437,9 @@ def train_rfdetr_backend(
         model_variant=rfdetr_variant,
     )
 
-    # ── Clean up temporary YOLO layout (not needed after training) ──
-    tmp_root = Path(".tmp")
-    if rfdetr_export_dir.exists():
-        shutil.rmtree(rfdetr_export_dir, ignore_errors=True)
-    # Remove empty parent dirs (.tmp/rfdetr_datasets/, .tmp/) if nothing else uses them
-    for parent in (rfdetr_export_dir.parent, tmp_root):
-        try:
-            parent.rmdir()  # only succeeds if empty
-        except OSError as exc:
-            # Only suppress the expected "not empty" / "already gone" cases.
-            if exc.errno in {errno.ENOTEMPTY, errno.ENOENT}:
-                logger.debug("Skipping temp dir cleanup for %s: %s", parent, exc)
-                continue
-            raise
+    shutil.rmtree(rfdetr_export_dir, ignore_errors=True)
 
     return model, train_output_dir, display_name, int(rfdetr_resolution), int(rfdetr_epochs)
-
-
-def train_backend(
-    *,
-    training_path: Path,
-    test_path: Path,
-    dataset_name: str,
-    resolved_cfg: dict,
-    experiment_name: str | None,
-) -> tuple[object, Path, str, int, int]:
-    return train_rfdetr_backend(
-        training_path=training_path,
-        test_path=test_path,
-        dataset_name=dataset_name,
-        resolved_cfg=resolved_cfg,
-        experiment_name=experiment_name,
-    )
 
 
 __all__ = [
@@ -480,7 +448,6 @@ __all__ = [
     "load_model_from_weights",
     "resolve_config",
     "train_backend",
-    "train_rfdetr_backend",
     "_get_rfdetr_model",
     "_normalize_rfdetr_resolution",
 ]

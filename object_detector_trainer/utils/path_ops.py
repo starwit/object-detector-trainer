@@ -1,9 +1,10 @@
 """Shared path and file-transfer primitives used in multiple core modules.
 
 Why this file exists:
-1) run-dir uniqueness logic is reused by multiple backends,
-2) dataset-name sanitization rules must stay consistent across exporters,
-3) copy/link behavior should be implemented once.
+1) config paths are resolved relative to the active workspace,
+2) run-dir uniqueness logic is reused by multiple backends,
+3) dataset-name sanitization rules must stay consistent across exporters,
+4) copy/link behavior should be implemented once.
 """
 
 from __future__ import annotations
@@ -12,6 +13,16 @@ import errno
 import os
 import shutil
 from pathlib import Path
+
+
+def resolve_workspace_path(raw_path: str | Path | None, *, root: Path | None = None) -> Path | None:
+    """Resolve a config path relative to the current workspace or an explicit root."""
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (root or Path.cwd()) / path
 
 
 def resolve_unique_run_dir(root: Path, run_name: str) -> Path:

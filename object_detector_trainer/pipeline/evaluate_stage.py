@@ -16,6 +16,7 @@ from object_detector_trainer.pipeline.model_state import (
     load_persisted_train_result,
     resolve_baseline_model,
 )
+from object_detector_trainer.utils.path_ops import resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -60,29 +61,6 @@ def _organize_training_outputs(
     logger.info("Plots saved to %s", plots_dir)
 
 
-def _delete_unused_folders() -> None:
-    current_runs_dir = Path("runs")
-    if not current_runs_dir.exists():
-        return
-    for folder in current_runs_dir.iterdir():
-        if folder.is_dir() and not any(folder.iterdir()):
-            folder.rmdir()
-
-
-def _log_export_guidance(train_output_dir: Path, experiment_name: str) -> None:
-    guidance_lines = [
-        "",
-        "=" * 70,
-        f"Training complete for {experiment_name}.",
-        f"Run artifacts: {train_output_dir}",
-        "Baseline promotion/export is intentionally project-specific.",
-        "Use the workflow defined by the consumer project for baseline updates.",
-        "=" * 70,
-    ]
-    for line in guidance_lines:
-        logger.info(line)
-
-
 def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
     baseline_weights_path = str(cfg.evaluation.baseline_weights_path or "").strip()
     if not baseline_weights_path:
@@ -97,10 +75,6 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
             persisted.best_weights_path,
             metadata_override=persisted.reload_metadata,
         )
-        if model is None:
-            raise FileNotFoundError(
-                f"Could not load trained model from persisted path: {persisted.best_weights_path}"
-            )
 
         return EvaluationContext(
             model=model,
@@ -248,17 +222,17 @@ def _resolve_optional_baseline_model(
       (which requires valid metadata including model_backend).
     """
 
-    candidate = Path(baseline_weights_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
+    candidate = resolve_workspace_path(baseline_weights_path)
+    if candidate is None:
+        raise ValueError("evaluation.baseline_weights_path must be configured for evaluation.")
 
     metadata_candidates = (
         candidate.parent / "metadata.yaml",
         candidate.parent.parent / "metadata.yaml",
     )
-    metadata_dvc_candidates = [path.with_name(f"{path.name}.dvc") for path in metadata_candidates]
-    baseline_promoted = any(path.exists() for path in metadata_candidates) or any(
-        path.exists() for path in metadata_dvc_candidates
+    baseline_promoted = any(
+        path.exists() or path.with_name(f"{path.name}.dvc").exists()
+        for path in metadata_candidates
     )
 
     if candidate.exists() and not candidate.is_file():
@@ -267,11 +241,12 @@ def _resolve_optional_baseline_model(
             f"got: {candidate}"
         )
 
-    baseline_ready = candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0
+    baseline_ready = candidate.is_file() and candidate.stat().st_size > 0
     if not baseline_ready:
         if baseline_promoted:
             raise FileNotFoundError(
-                "Promoted baseline metadata exists, but the baseline weights file is missing/empty at "
+                "Promoted baseline metadata exists, but the baseline weights file "
+                "is missing/empty at "
                 f"{candidate}. Fetch the baseline explicitly (for example `dvc pull {candidate}`)."
             )
         logger.warning(
@@ -371,6 +346,3 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
         include_per_class=False,
         include_details=False,
     )
-
-    _delete_unused_folders()
-    _log_export_guidance(context.train_output_dir, context.experiment_name)

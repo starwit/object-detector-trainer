@@ -18,6 +18,8 @@ from object_detector_trainer.backends.assets import (
     require_bootstrapped_file,
     resolve_cache_dir,
 )
+from object_detector_trainer.utils.path_ops import resolve_unique_run_dir, resolve_workspace_path
+
 
 def resolve_config(
     *,
@@ -78,79 +80,30 @@ def YOLO(*args, **kwargs):
 
 
 def _resolve_required_weights(path_like: str | Path, *, label: str) -> Path:
-    candidate = Path(path_like).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    if not candidate.exists():
+    path = resolve_workspace_path(path_like)
+    if path is None or not path.is_file() or path.stat().st_size == 0:
         if label == "train.finetune.weights":
             raise FileNotFoundError(
                 "Fine-tuning mode is enabled, but "
-                f"{label} does not exist: {candidate}"
+                f"{label} must point to an existing non-empty file: {path}"
             )
-        raise FileNotFoundError(f"{label} does not exist: {candidate}")
-    if candidate.stat().st_size == 0:
-        if label == "train.finetune.weights":
-            raise FileNotFoundError(
-                "Fine-tuning mode is enabled, but "
-                f"{label} is empty: {candidate}"
-            )
-        raise FileNotFoundError(f"{label} is empty: {candidate}")
-    return candidate
+        raise FileNotFoundError(f"{label} must point to an existing non-empty file: {path}")
+    return path
 
 
-def _resolve_save_dir(model, results, default: Path) -> Path:
-    """Return Ultralytics' actual save_dir if available, else default.
+def train_backend(
+    *,
+    training_path: Path,
+    test_path: Path,
+    dataset_name: str,
+    resolved_cfg: dict,
+    experiment_name: str | None,
+) -> tuple[object, Path, str, int, int]:
+    finetune_mode = bool(resolved_cfg.get("finetune_mode", False))
+    run_name = experiment_name
 
-    Keeps train_model concise while handling version differences
-    (trainer.save_dir vs. results.save_dir).
-    """
-    trainer = getattr(model, "trainer", None)
-    candidate = getattr(trainer, "save_dir", None) if trainer is not None else None
-    if isinstance(candidate, (str, Path)):
-        return Path(candidate)
-
-    candidate = getattr(results, "save_dir", None)
-    if isinstance(candidate, (str, Path)):
-        return Path(candidate)
-
-    return default
-
-
-def train_model(
-    dataset_path,
-    checkpoint,
-    image_size,
-    batch_size,
-    experiment_name,
-    epochs=100,
-    finetune_mode=False,
-    pretrained_model_path=None,
-    finetune_lr=None,
-    freeze_backbone=False,
-    single_phase_overrides: dict | None = None,
-):
-    """
-    Train the YOLO model on the specified dataset.
-
-    Args:
-        dataset_path (Path): Path to the dataset directory.
-        checkpoint (str): YOLO checkpoint to train from (e.g., 'yolov8m.pt').
-        image_size (int): Size of images for training.
-        batch_size (int): Batch size for training.
-        experiment_name (str): Name for the experiment.
-        epochs (int): Number of training epochs.
-        finetune_mode (bool): Whether to use fine-tuning mode.
-        pretrained_model_path (str): Path to pre-trained model for fine-tuning.
-        finetune_lr (float): Learning rate for fine-tuning.
-        freeze_backbone (bool): Whether to freeze backbone layers during fine-tuning.
-
-    Returns:
-        model (YOLO): The trained YOLO model.
-        results: Training results.
-        Path: Directory path of the training output.
-    """
-    # Choose model based on fine-tuning mode
     if finetune_mode:
+        pretrained_model_path = resolved_cfg.get("pretrained_model_path")
         if not pretrained_model_path:
             raise ValueError(
                 "Fine-tuning mode is enabled, but train.finetune.weights is not set."
@@ -161,10 +114,10 @@ def train_model(
         )
         print(f"Fine-tuning mode enabled. Loading pre-trained model: {pretrained_model}")
         model = YOLO(str(pretrained_model))
-        experiment_name = f"{experiment_name}-finetune"
+        run_name = f"{experiment_name}-finetune" if experiment_name else None
     else:
         checkpoint_path = _resolve_required_weights(
-            str(checkpoint),
+            str(resolved_cfg["checkpoint"]),
             label="models.<key>.checkpoint",
         )
         print(f"Using YOLO checkpoint: {checkpoint_path}")
@@ -173,23 +126,14 @@ def train_model(
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Define project name and ensure unique run name
     project = "runs"
-    name = None
-    if experiment_name:
-        base_name = experiment_name
-        name = base_name
-        run_number = 1
-        while (Path(project) / name).exists():
-            name = f"{base_name}_{run_number}"
-            run_number += 1
+    name = resolve_unique_run_dir(Path(project), run_name).name if run_name else None
 
-    # Prepare training arguments
     train_args = {
-        "data": str(dataset_path / "dataset.yaml"),
-        "epochs": epochs,
-        "imgsz": image_size,
-        "batch": batch_size,
+        "data": str(training_path / "dataset.yaml"),
+        "epochs": int(resolved_cfg["epochs"]),
+        "imgsz": int(resolved_cfg["image_size"]),
+        "batch": int(resolved_cfg["batch_size"]),
         "device": device,
         "workers": 4,
         # Keep runtime offline/strict: Ultralytics' AMP checks auto-download
@@ -201,20 +145,20 @@ def train_model(
     if name:
         train_args["name"] = name
 
-    # Two-phase path removed for simplicity; single-phase fine-tune only
-
-    # Single-phase (original) path
     if finetune_mode:
+        finetune_lr = resolved_cfg.get("finetune_lr")
         if finetune_lr is not None:
             train_args["lr0"] = finetune_lr
             print(f"Using fine-tuning learning rate: {finetune_lr}")
 
-        if freeze_backbone:
+        if bool(resolved_cfg.get("freeze_backbone", False)):
             # Freeze backbone layers (layers 0-9 typically for YOLOv8)
             train_args["freeze"] = list(range(10))
             print("Freezing backbone layers for fine-tuning")
 
-        # Allow minimal, explicit overrides (optimizer, mosaic, mixup, close_mosaic, cos_lr, lrf, patience)
+        # Fine-tune overrides stay explicit so normal training keeps the
+        # default Ultralytics schedule.
+        single_phase_overrides = resolved_cfg.get("single_phase_overrides")
         if single_phase_overrides:
             sp = {k: v for k, v in single_phase_overrides.items() if v is not None}
             if sp:
@@ -222,68 +166,13 @@ def train_model(
                 train_args.update(sp)
 
     results = model.train(**train_args)
-
-    default_dir = Path(project) / (name if name else "train")
-    output_dir = _resolve_save_dir(model, results, default_dir)
-
-    # Keep return signature compatible with tests: (model, results, output_dir)
-    return model, results, output_dir
-
-
-def train_yolo(
-    *,
-    training_path: Path,
-    resolved_cfg: dict,
-    experiment_name: str | None,
-) -> tuple[object, object, Path, str | None]:
-    """Backend wrapper used by ``train_pipeline.py``."""
-
-    model, results, train_output_dir = train_model(
-        training_path,
-        resolved_cfg["checkpoint"],
-        int(resolved_cfg["image_size"]),
-        int(resolved_cfg["batch_size"]),
-        experiment_name,
-        epochs=int(resolved_cfg["epochs"]),
-        finetune_mode=bool(resolved_cfg.get("finetune_mode", False)),
-        pretrained_model_path=resolved_cfg.get("pretrained_model_path"),
-        finetune_lr=resolved_cfg.get("finetune_lr"),
-        freeze_backbone=bool(resolved_cfg.get("freeze_backbone", False)),
-        single_phase_overrides=resolved_cfg.get("single_phase_overrides"),
-    )
-
-    final_experiment_name = (
-        (
-            f"{experiment_name}-finetune"
-            if experiment_name
-            and bool(resolved_cfg.get("finetune_mode", False))
-            and resolved_cfg.get("pretrained_model_path")
-            else experiment_name
-        )
-    )
-    return model, results, train_output_dir, final_experiment_name
-
-
-def train_backend(
-    *,
-    training_path: Path,
-    test_path: Path,
-    dataset_name: str,
-    resolved_cfg: dict,
-    experiment_name: str | None,
-) -> tuple[object, Path, str, int, int]:
-    model, _results, train_output_dir, final_experiment_name = train_yolo(
-        training_path=training_path,
-        resolved_cfg=resolved_cfg,
-        experiment_name=experiment_name,
-    )
     model.model_backend = "yolo"
     model.model_variant = str(resolved_cfg["model_key"])
     model.resolution = int(resolved_cfg["image_size"])
     return (
         model,
-        train_output_dir,
-        final_experiment_name or resolved_cfg["model_key"],
+        Path(results.save_dir),
+        run_name or resolved_cfg["model_key"],
         int(resolved_cfg["image_size"]),
         int(resolved_cfg["epochs"]),
     )
@@ -295,6 +184,4 @@ __all__ = [
     "load_model_from_weights",
     "resolve_config",
     "train_backend",
-    "train_model",
-    "train_yolo",
 ]
