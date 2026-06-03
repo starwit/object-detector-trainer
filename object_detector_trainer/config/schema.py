@@ -35,7 +35,6 @@ class AutoReplayConfig(BaseModel):
     conf_thr: float = 0.25
     border_conf: float = 0.35
     include_empty: bool = True
-    seed: int = 42
     dest: str = "raw_data/train/replay"
 
 

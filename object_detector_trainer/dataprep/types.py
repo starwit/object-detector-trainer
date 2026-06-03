@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, NamedTuple
+from typing import NamedTuple
 
 
 class ImageLabelPair(NamedTuple):
@@ -11,8 +11,6 @@ class ImageLabelPair(NamedTuple):
 
 class ProcessedFolder(NamedTuple):
     """Result of processing a folder into image/label pairs."""
-    pairs: List[ImageLabelPair]
-    temp_folders: List[Path]
+    pairs: list[ImageLabelPair]
+    temp_folders: list[Path]
     empty_label_count: int
-    # For CVAT processing we also track skipped images; defaults to 0 otherwise
-    skip_count: int = 0

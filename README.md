@@ -69,6 +69,20 @@ MMCV_WITH_OPS=1 poetry run pip install "mmcv==2.1.0" --no-binary=mmcv --no-build
 poetry run python -c "import mmcv._ext"
 ```
 
+### RF-DETR Resolution
+
+RF-DETR models require image resolutions that match their upstream patch/window
+divisors. The trainer fails during config resolution if the configured
+resolution is invalid.
+
+| Variant | Valid resolution rule |
+| --- | --- |
+| `nano`, `small`, `medium` | divisible by `32` |
+| `base`, `large` | divisible by `56` |
+
+Set `models.<model_key>.resolution` for RF-DETR models. If it is omitted, the
+trainer uses `train.image_size`, which must follow the same rule.
+
 ## Using This In A Project
 
 This repo is the trainer engine. In our workflow it is typically consumed from a project repository or a template repository that provides:

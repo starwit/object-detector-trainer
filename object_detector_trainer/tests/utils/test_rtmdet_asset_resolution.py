@@ -21,8 +21,6 @@ def test_rtmdet_resolve_does_not_fallback_to_unrelated_checkpoint(tmp_path: Path
 
     with pytest.raises(FileNotFoundError):
         _resolve_rtmdet_assets(
-            config_path=None,
-            checkpoint_path=None,
             config_name="rtmdet_m_8xb32-300e_coco",
             cache_dir=cache_dir,
         )
@@ -95,3 +93,30 @@ def test_rtmdet_baseline_uses_portable_adjacent_config_before_cache_lookup(
     assert init_calls["weights"] == str(weights_path)
     assert init_calls["adapter_model_name"] == "portable-baseline"
     assert init_calls["adapter_config_path"] == str(config_path)
+
+
+def test_rtmdet_baseline_fails_when_explicit_config_path_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weights_path = tmp_path / "best.pt"
+    weights_path.write_bytes(b"stub-weights")
+    (tmp_path / "model_config.py").write_text("# adjacent config\n", encoding="utf-8")
+
+    fake_mmcv = types.ModuleType("mmcv")
+    fake_mmcv_ext = types.ModuleType("mmcv._ext")
+    monkeypatch.setitem(sys.modules, "mmcv", fake_mmcv)
+    monkeypatch.setitem(sys.modules, "mmcv._ext", fake_mmcv_ext)
+
+    with pytest.raises(FileNotFoundError, match="model_config_path"):
+        core_rtmdet.load_rtmdet_baseline(
+            weights_path=weights_path,
+            metadata={
+                "model_backend": "rtmdet",
+                "model_config_path": "missing_config.py",
+                "rtmdet_config_name": "rtmdet_tiny_8xb32-300e_coco",
+                "rtmdet_cache_dir": str(tmp_path),
+                "image_size": 320,
+            },
+            display_name="broken-baseline",
+        )

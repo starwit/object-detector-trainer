@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import logging
 import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
 
-logger = logging.getLogger(__name__)
+from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
 
 
 class SceneMetricsError(RuntimeError):
@@ -36,17 +35,14 @@ def _collect_scene_images(val_images_dir: Path, val_labels_dir: Path) -> dict:
             continue
         if "__scene_" not in img_path.name:
             continue
-        parts = img_path.stem.split("__scene_")
-        if len(parts) <= 1:
-            continue
-        scene_name = parts[1]
+        _, scene_name = img_path.stem.split("__scene_", 1)
         scene_images.setdefault(scene_name, []).append(
             (img_path, val_labels_dir / img_path.with_suffix(".txt").name)
         )
     return scene_images
 
 
-def _copy_scene_to_temp(scene_name: str, images_labels: list) -> tuple[Path | None, int]:
+def _copy_scene_to_temp(scene_name: str, images_labels: list) -> tuple[Path, int]:
     temp_path = Path(tempfile.mkdtemp())
     temp_images_dir = temp_path / "images"
     temp_labels_dir = temp_path / "labels"
@@ -55,29 +51,12 @@ def _copy_scene_to_temp(scene_name: str, images_labels: list) -> tuple[Path | No
 
     copied_files = 0
     for img_path, label_path in images_labels:
-        if not img_path.exists() or not label_path.exists():
-            logger.warning(
-                "Source file missing during copy for scene '%s': %s or %s",
-                scene_name,
-                img_path,
-                label_path,
-            )
-            continue
         new_img_name = img_path.name.replace(f"__scene_{scene_name}", "")
         new_label_name = label_path.name.replace(f"__scene_{scene_name}", "")
-        try:
-            shutil.copy(img_path, temp_images_dir / new_img_name)
-            shutil.copy(label_path, temp_labels_dir / new_label_name)
-            copied_files += 1
-        except OSError as exc:
-            logger.warning(
-                "Error copying %s or %s to %s: %s",
-                img_path,
-                label_path,
-                temp_path,
-                exc,
-            )
-    return (temp_path if copied_files > 0 else None), copied_files
+        shutil.copy(img_path, temp_images_dir / new_img_name)
+        shutil.copy(label_path, temp_labels_dir / new_label_name)
+        copied_files += 1
+    return temp_path, copied_files
 
 
 def _write_scene_yaml(temp_path: Path, dataset_config: dict, scene_name: str) -> Path:
@@ -86,14 +65,11 @@ def _write_scene_yaml(temp_path: Path, dataset_config: dict, scene_name: str) ->
         "path": str(temp_path),
         "train": "images",
         "val": "images",
-        "nc": len(dataset_config.get("names", [])),
-        "names": dataset_config.get("names", {}),
+        "nc": dataset_config["nc"],
+        "names": dataset_config["names"],
     }
-    try:
-        with temp_yaml_path.open("w", encoding="utf-8") as handle:
-            yaml.dump(scene_config, handle)
-    except OSError as exc:
-        raise SceneMetricsError(f"Error writing temporary YAML {temp_yaml_path}: {exc}") from exc
+    with temp_yaml_path.open("w", encoding="utf-8") as handle:
+        yaml.dump(scene_config, handle)
     return temp_yaml_path
 
 
@@ -109,7 +85,7 @@ def _validate_scene(model, temp_yaml_path: Path, class_ids: list | None, kwargs:
         plots=False,
         **eval_kwargs,
     )
-    return float(getattr(scene_results, "fitness", 0.0))
+    return float(scene_results.fitness)
 
 
 def calculate_scene_metrics(model, data, **kwargs):
@@ -123,9 +99,7 @@ def calculate_scene_metrics(model, data, **kwargs):
     val_images_dir = dataset_path / dataset_config["val"]
     val_labels_dir = val_images_dir.parent / "labels"
 
-    from object_detector_trainer.evaluation import validate as validate_core
-
-    _, class_ids = validate_core.get_dataset_classes(data)
+    _, class_ids = get_dataset_classes(data)
     scene_images = _collect_scene_images(val_images_dir, val_labels_dir)
     scene_metrics = {}
 
@@ -133,17 +107,13 @@ def calculate_scene_metrics(model, data, **kwargs):
         temp_path = None
         try:
             temp_path, copied_files = _copy_scene_to_temp(scene_name, images_labels)
-            if not temp_path or copied_files == 0:
-                logger.warning("No files were copied for scene '%s'. Skipping validation.", scene_name)
-                continue
+            if copied_files == 0:
+                raise SceneMetricsError(f"No files were copied for scene {scene_name!r}.")
 
             temp_yaml_path = _write_scene_yaml(temp_path, dataset_config, scene_name)
 
             fitness = _validate_scene(model, temp_yaml_path, class_ids, kwargs)
             scene_metrics[f"scene_{scene_name}_fitness"] = fitness
-        except (OSError, RuntimeError, SceneMetricsError) as exc:
-            logger.warning("Error evaluating scene '%s' using data '%s': %s", scene_name, data, exc)
-            scene_metrics[f"scene_{scene_name}_fitness"] = 0.0
         finally:
             if temp_path and temp_path.exists():
                 shutil.rmtree(temp_path, ignore_errors=True)

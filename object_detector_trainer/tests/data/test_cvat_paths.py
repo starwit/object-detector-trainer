@@ -29,8 +29,15 @@ def test_cvat_train_txt_paths(tmp_path: Path):
     train_txt = input_root / "train.txt"
     train_txt.write_text("\n".join([
         "data/images/img1.jpg",
-        "data/images/img2.jpg",
+        "images/img2.jpg",
     ]))
+
+    # Simulate a generated temp folder left behind by an interrupted previous run.
+    stale_temp = input_root.parent / "source_cvat_temp"
+    (stale_temp / "images").mkdir(parents=True, exist_ok=True)
+    (stale_temp / "labels").mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(stale_temp / "images" / "stale.jpg"), img1)
+    (stale_temp / "labels" / "stale.txt").write_text("0 0.5 0.5 0.2 0.2\n")
 
     # Output dataset folders
     train_out = tmp_path / "dataset" / "train"
@@ -54,6 +61,7 @@ def test_cvat_train_txt_paths(tmp_path: Path):
     assert train_count == 2
     assert val_count == 0
     assert test_count == 0
+    assert not stale_temp.exists()
 
     # Check images and labels copied
     copied_imgs = list((train_out / "train" / "images").glob("*.jpg"))

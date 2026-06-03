@@ -235,16 +235,20 @@ def test_heavy_backend_contract_one_epoch(
     run_evaluate_stage(args, train_result=train_result)
 
     _assert_wrapper_contract(train_result.model, backend)
-    assert train_result.train_output_dir.parent.resolve() == (tmp_path / "runs").resolve()
-    _assert_run_contract(train_result.train_output_dir)
+    assert train_result.train_output_dir.parent.resolve() == (tmp_path / ".dvc_artifacts" / "train_runs").resolve()
+    published_run_dir = tmp_path / "runs" / train_result.train_output_dir.name
+    _assert_run_contract(published_run_dir)
     _assert_summary_contract(tmp_path)
     _assert_metrics_contract(tmp_path)
 
-    marker = tmp_path / "runs" / ".last_train_result.json"
-    assert marker.exists(), "runs/.last_train_result.json must exist"
+    marker = tmp_path / ".dvc_artifacts" / "last_train_result.json"
+    assert marker.exists(), ".dvc_artifacts/last_train_result.json must exist"
     payload = json.loads(marker.read_text(encoding="utf-8"))
     assert payload["reload_metadata"]["model_backend"] == backend
     assert Path(payload["best_weights_path"]).exists()
+
+    published_marker = tmp_path / "runs" / ".last_train_result.json"
+    assert published_marker.exists(), "Published runs marker must exist"
 
     cache_files = [path for path in backend_cache_dir.rglob("*") if path.is_file()]
     assert cache_files, f"{backend} contract expected local assets under cache_dir."

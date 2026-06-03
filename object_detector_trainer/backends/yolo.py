@@ -65,8 +65,7 @@ def load_model_from_weights(
     setattr(model_instance, "model_name", str(display_name))
     if meta.get("model_variant"):
         setattr(model_instance, "model_variant", str(meta["model_variant"]))
-    if meta.get("image_size") is not None:
-        setattr(model_instance, "resolution", int(meta["image_size"]))
+    setattr(model_instance, "resolution", int(meta["image_size"]))
     class_names = meta.get("class_names")
     if isinstance(class_names, dict) and class_names:
         setattr(model_instance, "class_names", {int(k): str(v) for k, v in class_names.items()})
@@ -126,8 +125,9 @@ def train_backend(
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    project = "runs"
-    name = resolve_unique_run_dir(Path(project), run_name).name if run_name else None
+    runs_root = Path(str(resolved_cfg.get("runs_root", "runs")))
+    runs_root.mkdir(parents=True, exist_ok=True)
+    name = resolve_unique_run_dir(runs_root, run_name).name if run_name else None
 
     train_args = {
         "data": str(training_path / "dataset.yaml"),
@@ -140,7 +140,7 @@ def train_backend(
         # YOLO11n if it's missing. Users can explicitly re-enable AMP via
         # single_phase_overrides={"amp": True} once assets are provisioned.
         "amp": False,
-        "project": project,
+        "project": str(runs_root),
     }
     if name:
         train_args["name"] = name
@@ -167,6 +167,7 @@ def train_backend(
 
     results = model.train(**train_args)
     model.model_backend = "yolo"
+    model.model_name = str(resolved_cfg["model_key"])
     model.model_variant = str(resolved_cfg["model_key"])
     model.resolution = int(resolved_cfg["image_size"])
     return (

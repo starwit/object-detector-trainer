@@ -21,9 +21,9 @@ def compute_coco_metrics(
     *,
     eval_fn: Callable[[list[dict], list[dict], list[dict], list[dict]], CocoEvalResults],
 ) -> CocoEvalResults:
-    """Compute COCO metrics with empty-dataset guard."""
+    """Compute COCO metrics for a non-empty validation image set."""
     if len(images) == 0:
-        return CocoEvalResults(0.0, 0.0, 0.0, 0.0, {}, macro_f1=0.0)
+        raise ValueError("Validation dataset contains no images.")
     return eval_fn(images, annotations, detections, categories)
 
 
@@ -37,7 +37,7 @@ def parse_class_names(ds_cfg: dict) -> dict[int, str]:
 
 def _iter_dataset_images(images_dir: Path) -> list[Path]:
     if not images_dir.exists():
-        return []
+        raise FileNotFoundError(f"Dataset images directory not found: {images_dir}")
     return sorted(
         path
         for path in images_dir.iterdir()
@@ -52,6 +52,7 @@ def _parse_yolo_label_file(
     width: int,
     height: int,
     classes_filter: set[int] | None,
+    valid_class_ids: set[int],
     ann_id_start: int,
 ) -> tuple[list[dict], int]:
     annotations: list[dict] = []
@@ -62,16 +63,20 @@ def _parse_yolo_label_file(
     with label_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             parts = line.strip().split()
+            if not parts:
+                continue
             if len(parts) < 5:
-                continue
-            try:
-                cls_id = int(float(parts[0]))
-                cx = float(parts[1])
-                cy = float(parts[2])
-                bw = float(parts[3])
-                bh = float(parts[4])
-            except ValueError:
-                continue
+                raise ValueError(f"Malformed YOLO label line in {label_path}: {line.strip()!r}")
+            cls_id = int(float(parts[0]))
+            cx = float(parts[1])
+            cy = float(parts[2])
+            bw = float(parts[3])
+            bh = float(parts[4])
+            if cls_id not in valid_class_ids:
+                raise ValueError(
+                    f"Label {label_path} references class id {cls_id}, "
+                    "which is not present in dataset.yaml."
+                )
             if classes_filter and cls_id not in classes_filter:
                 continue
             x = (cx - bw / 2.0) * width
@@ -105,7 +110,7 @@ def evaluate_yolo_dataset(
     if "path" not in ds_cfg:
         raise ValueError(f"Dataset YAML at {data} is missing required 'path'.")
     dataset_path = Path(ds_cfg["path"])
-    val_rel = ds_cfg.get("val", "val/images")
+    val_rel = ds_cfg["val"]
     images_dir = dataset_path / val_rel
     labels_dir = images_dir.parent / "labels"
 
@@ -122,7 +127,7 @@ def evaluate_yolo_dataset(
     for img_path in _iter_dataset_images(images_dir):
         img = cv2.imread(str(img_path))
         if img is None:
-            continue
+            raise FileNotFoundError(f"Could not read dataset image: {img_path}")
         image_id += 1
         height, width = img.shape[:2]
         gt_images.append({"id": image_id, "file_name": img_path.name, "width": width, "height": height})
@@ -133,6 +138,7 @@ def evaluate_yolo_dataset(
             width=width,
             height=height,
             classes_filter=classes_filter,
+            valid_class_ids=keep_ids,
             ann_id_start=ann_id,
         )
         gt_annotations.extend(parsed_annotations)

@@ -11,7 +11,7 @@ def _coerce_yolo_labels(labels: list[list[float]]) -> list[list[float]]:
     normalized: list[list[float]] = []
     for raw_label in labels:
         if len(raw_label) < 5:
-            continue
+            raise ValueError(f"Malformed YOLO label row: {raw_label}")
         class_id = int(raw_label[0])
         bbox = [float(value) for value in raw_label[1:5]]
         normalized.append([float(class_id), *bbox])

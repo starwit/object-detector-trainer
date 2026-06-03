@@ -21,7 +21,7 @@ def load_yolo_dataset_yaml(path: str | Path) -> dict:
 
 
 def normalize_class_names(payload: dict) -> dict[int, str]:
-    names = payload.get("names", {})
+    names = payload["names"]
     if isinstance(names, list):
         return {i: str(name) for i, name in enumerate(names)}
     if isinstance(names, dict):
@@ -36,11 +36,7 @@ def normalize_class_names(payload: dict) -> dict[int, str]:
                 ) from e
             parsed[cls_id] = str(raw_name)
         return {k: parsed[k] for k in sorted(parsed)}
-    return {}
-
-
-def get_class_ids(payload: dict) -> list[int]:
-    return list(normalize_class_names(payload).keys())
+    raise ValueError(f"Invalid dataset YAML names section: expected list or dict, got {type(names)}")
 
 
 def get_dataset_classes(path: str | Path) -> tuple[dict[int, str], list[int]]:

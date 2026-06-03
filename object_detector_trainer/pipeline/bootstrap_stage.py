@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from object_detector_trainer.backends.assets import (
     resolve_cache_dir,
     require_asset_id,
     require_bootstrapped_file,
 )
+from object_detector_trainer.backends.training_config import resolve_training_config
 from object_detector_trainer.backends.registry import (
     normalize_backend_name,
     bootstrap_model_assets,
@@ -46,8 +48,6 @@ def _resolve_model_assets(model_key: str, model_cfg: dict) -> dict[str, object]:
     from object_detector_trainer.backends import rtmdet as core_rtmdet
 
     cfg_path, ckpt_path, variant = core_rtmdet._resolve_rtmdet_assets(
-        config_path=None,
-        checkpoint_path=None,
         config_name=asset_id,
         cache_dir=cache_dir,
     )
@@ -78,6 +78,10 @@ def run_bootstrap_stage(args, config=None) -> None:
 
     assets: dict[str, dict[str, object]] = {}
     for model_key in model_keys:
+        validation_args = SimpleNamespace(**vars(args))
+        validation_args.model = str(model_key)
+        resolve_training_config(validation_args, cfg)
+
         model_cfg = cfg.models[model_key]
         bootstrap_model_assets(str(model_key), model_cfg)
         assets[str(model_key)] = _resolve_model_assets(str(model_key), model_cfg)

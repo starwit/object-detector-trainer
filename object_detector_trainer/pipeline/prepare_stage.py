@@ -57,12 +57,20 @@ def run_prepare_stage(args, config=None) -> Path:
     training_path = dataset_path / "train"
     test_path = dataset_path / "test"
 
+    raw_test_split = getattr(args, "test_split", None)
+    configured_test_split = float(
+        cfg.prepare.test_split if raw_test_split is None else raw_test_split
+    )
     test_data_exists = check_for_test_images(test_image_input_path)
-    if not test_data_exists:
-        raw_test_split = getattr(args, "test_split", None)
-        test_split = float(cfg.prepare.test_split if raw_test_split is None else raw_test_split)
-    else:
+    if test_data_exists:
+        if configured_test_split > 0:
+            print(
+                "raw_data/test contains test images; prepare.test_split is ignored "
+                "because the explicit test folder is used."
+            )
         test_split = 0.0
+    else:
+        test_split = configured_test_split
 
     if not dataset_path.exists() or recreate_dataset:
         total_train_frames, total_val_frames, total_test_frames = create_dataset_from_raw(

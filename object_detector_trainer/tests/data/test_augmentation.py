@@ -10,7 +10,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
+from object_detector_trainer.dataprep.augmentation import YOLOAugmenter
 from object_detector_trainer.dataprep.dataset_builder import process_single_images
 
 
@@ -62,3 +64,11 @@ def test_augmentation_increases_train_samples(tmp_path: Path) -> None:
     imgs = list(out_img_dir.glob("*.jpg"))
     lbls = list(out_lbl_dir.glob("*.txt"))
     assert len(imgs) == len(lbls) == n * 2
+
+
+def test_augmentation_rejects_malformed_label_rows() -> None:
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    augmenter = YOLOAugmenter(multiplier=1)
+
+    with pytest.raises(ValueError, match="Malformed YOLO label row"):
+        augmenter.augment_image_and_labels(image, [[0.0, 0.5, 0.5]])

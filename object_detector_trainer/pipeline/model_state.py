@@ -1,7 +1,7 @@
 """Shared train/evaluate state and model-loading logic.
 
 This module exists to keep one source of truth for:
-1) persisted train-result schema (runs/.last_train_result.json),
+1) persisted train-result schema (.dvc_artifacts/last_train_result.json),
 2) loading a trained model from saved weights/metadata,
 3) strict baseline/model artifact loading.
 
@@ -25,8 +25,10 @@ from object_detector_trainer.backends.registry import (
 from object_detector_trainer.utils.path_ops import resolve_workspace_path
 
 
-RUNS_ROOT = Path("runs")
-LAST_TRAIN_RESULT_PATH = RUNS_ROOT / ".last_train_result.json"
+TRAIN_RUNS_ROOT = Path(".dvc_artifacts") / "train_runs"
+TRAIN_RESULT_PATH = Path(".dvc_artifacts") / "last_train_result.json"
+PUBLISHED_RUNS_ROOT = Path("runs")
+PUBLISHED_TRAIN_RESULT_PATH = PUBLISHED_RUNS_ROOT / ".last_train_result.json"
 
 
 @dataclass
@@ -57,6 +59,7 @@ def persist_train_result(
     training_path: Path,
     test_path: Path,
     reload_metadata: dict[str, Any],
+    marker_path: Path = TRAIN_RESULT_PATH,
 ) -> None:
     payload = {
         "train_output_dir": str(train_output_dir),
@@ -68,13 +71,13 @@ def persist_train_result(
         "best_weights_path": str(train_output_dir / "weights" / "best.pt"),
         "reload_metadata": reload_metadata,
     }
-    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
-    with LAST_TRAIN_RESULT_PATH.open("w", encoding="utf-8") as f:
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    with marker_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
 
 def load_persisted_train_result() -> PersistedTrainResult:
-    path = LAST_TRAIN_RESULT_PATH
+    path = TRAIN_RESULT_PATH
     if not path.exists():
         raise FileNotFoundError(
             f"No persisted train result found at {path}. "
@@ -91,7 +94,7 @@ def load_persisted_train_result() -> PersistedTrainResult:
         training_path=Path(payload["training_path"]),
         test_path=Path(payload["test_path"]),
         best_weights_path=Path(payload["best_weights_path"]),
-        reload_metadata=dict(payload.get("reload_metadata") or {}),
+        reload_metadata=dict(payload["reload_metadata"]),
     )
 
 
@@ -127,12 +130,7 @@ def load_model_from_weights(
             "Baseline and reload artifacts must include model metadata."
         )
 
-    display_name = (
-        meta.get("experiment_name")
-        or meta.get("baseline_display_name")
-        or meta.get("run_name")
-        or candidate_path.stem
-    )
+    display_name = str(meta["experiment_name"])
 
     backend_raw = str(meta.get("model_backend", "")).strip().lower()
     if not backend_raw:
@@ -150,17 +148,13 @@ def load_model_from_weights(
     return model_instance, str(display_name)
 
 
-def resolve_baseline_model(
-    baseline_weights_path: str | None,
-) -> tuple[object, str]:
-    baseline_model, baseline_display_name = load_model_from_weights(baseline_weights_path)
-    return baseline_model, (baseline_display_name or "baseline")
-
-
 __all__ = [
+    "PUBLISHED_RUNS_ROOT",
+    "PUBLISHED_TRAIN_RESULT_PATH",
     "PersistedTrainResult",
+    "TRAIN_RESULT_PATH",
+    "TRAIN_RUNS_ROOT",
     "load_model_from_weights",
     "load_persisted_train_result",
     "persist_train_result",
-    "resolve_baseline_model",
 ]

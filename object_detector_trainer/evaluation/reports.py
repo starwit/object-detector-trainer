@@ -17,12 +17,9 @@ def append_results_to_csv(train_output_dir, results, metadata, is_original=False
         else metadata["experiment_name"]
     )
 
-    reported_img_size = results.get("img_size")
-    if reported_img_size is None:
-        reported_img_size = metadata["image_size"]
     csv_data = {
         "MODEL": model_type,
-        "img_size": reported_img_size,
+        "img_size": results["img_size"],
         "precision": results["precision"],
         "recall": results["recall"],
         "map": results["map"],
@@ -70,8 +67,7 @@ def _append_per_class_to_csv(csv_path, per_class, model_name):
             key_map = {"ap50": "map50", "ap": "map"}
             for col in per_class_columns[2:]:
                 src_key = key_map.get(col, col)
-                val = cls_metrics.get(src_key, cls_metrics.get(col, 0.0))
-                row[col] = f"{val:.4f}" if isinstance(val, (int, float)) else val
+                row[col] = f"{float(cls_metrics[src_key]):.4f}"
             writer.writerow(row)
 
 
@@ -99,12 +95,7 @@ def _format_per_class_table(per_class_csv_path):
         for row in model_rows:
             table_row = [row["CLASS"]]
             for col in metric_cols:
-                val = row.get(col, "-")
-                try:
-                    val = float(val)
-                    table_row.append(f"{val:.4f}")
-                except (ValueError, TypeError):
-                    table_row.append(str(val))
+                table_row.append(f"{float(row[col]):.4f}")
             table_data.append(table_row)
 
         headers = ["CLASS"] + metric_cols
@@ -138,12 +129,8 @@ def _format_merged_class_table(csv_path):
         for row in model_rows:
             table_row = [f"{row['source_class']}→{row['target_class']}"]
             for col in metric_cols:
-                val = row.get(col, "-")
-                try:
-                    fval = float(val)
-                    table_row.append(f"{fval:.4f}" if col != "n_objects" else str(int(fval)))
-                except (ValueError, TypeError):
-                    table_row.append(str(val))
+                fval = float(row[col])
+                table_row.append(f"{fval:.4f}" if col != "n_objects" else str(int(fval)))
             table_data.append(table_row)
 
         headers = ["merged_class"] + metric_cols
@@ -172,15 +159,9 @@ def create_formatted_table(
     for col_index, header in enumerate(headers[1:], start=1):
         column_values = []
         for row in data:
-            if col_index >= len(row):
-                continue
             raw = row[col_index].strip()
-            if not raw or raw == "-":
-                continue
-            try:
+            if raw and raw != "-":
                 column_values.append(float(raw))
-            except ValueError:
-                continue
 
         if not column_values:
             best_values[header] = None
@@ -195,15 +176,11 @@ def create_formatted_table(
             continue
         formatted_row = [row[0]]
         for col_index, header in enumerate(headers[1:], start=1):
-            raw = row[col_index].strip() if col_index < len(row) else ""
+            raw = row[col_index].strip()
             if not raw or raw == "-":
                 formatted_row.append("-")
                 continue
-            try:
-                value = float(raw)
-            except ValueError:
-                formatted_row.append("-")
-                continue
+            value = float(raw)
 
             is_best = best_values.get(header) is not None and value == best_values[header]
             formatted_row.append(f"*{value:.4f}*" if is_best else f"{value:.4f}")
@@ -303,56 +280,10 @@ def write_merged_class_results(output_dir, all_model_results):
                 writer.writerow(row)
 
 
-def _collect_scene_columns(path_results2: dict | None) -> list:
-    if path_results2 is None:
-        return []
-    return [key for key in path_results2 if key.startswith("scene_") and key.endswith("_fitness")]
-
-
-def _format_values(rows: list) -> list:
-    formatted_data = []
-    for row in rows:
-        formatted_row = [row[0]]
-        formatted_values = []
-        for value in row[1:]:
-            if isinstance(value, (int, float)):
-                formatted_values.append(f"{value:.4f}")
-            else:
-                formatted_values.append(value)
-        formatted_row.extend(formatted_values)
-        formatted_data.append(formatted_row)
-    return formatted_data
-
-
-def _build_mean_table_rows(basic_columns, scene_columns, path_results1, path_results2, experiment_name, base_run, base_model_name):
-    if base_run and path_results1 is not None:
-        base_model_display_name = base_model_name if base_model_name else "YOLOv8m (base run)"
-        base_row = [base_model_display_name]
-        for col in basic_columns[1:]:
-            base_row.append(path_results1.get(col.lower(), "-"))
-        for col in scene_columns:
-            base_row.append(path_results1.get(col, 0.0))
-
-        retrained_row = [experiment_name]
-        for col in basic_columns[1:]:
-            retrained_row.append(path_results2.get(col.lower(), "-"))
-        for col in scene_columns:
-            retrained_row.append(path_results2.get(col, 0.0))
-        return [base_row, retrained_row]
-
-    retrained_row = [experiment_name]
-    for col in basic_columns[1:]:
-        retrained_row.append(path_results2.get(col.lower(), "-"))
-    for col in scene_columns:
-        retrained_row.append(path_results2.get(col, 0.0))
-    return [retrained_row]
-
-
 def mean_table(
     path_results1,
     path_results2,
     experiment_name,
-    base_run,
     base_model_name=None,
     *,
     output_dir: Path | None = None,
@@ -371,12 +302,34 @@ def mean_table(
         "ms_per_frame",
     ]
 
-    scene_columns = _collect_scene_columns(path_results2)
+    scene_columns = [
+        key
+        for key in path_results2
+        if key.startswith("scene_") and key.endswith("_fitness")
+    ]
     columns = basic_columns + scene_columns
-    data = _build_mean_table_rows(
-        basic_columns, scene_columns, path_results1, path_results2, experiment_name, base_run, base_model_name
+
+    rows = []
+    if path_results1 is not None:
+        if base_model_name is None:
+            raise ValueError("base_model_name is required when baseline results are provided.")
+        rows.append(
+            [base_model_name]
+            + [path_results1[col.lower()] for col in basic_columns[1:]]
+            + [path_results1[col] for col in scene_columns]
+        )
+    rows.append(
+        [experiment_name]
+        + [path_results2[col.lower()] for col in basic_columns[1:]]
+        + [path_results2[col] for col in scene_columns]
     )
-    formatted_data = _format_values(data)
+    formatted_data = [
+        [
+            value if index == 0 or not isinstance(value, (int, float)) else f"{value:.4f}"
+            for index, value in enumerate(row)
+        ]
+        for row in rows
+    ]
 
     target_dir = Path(output_dir) if output_dir is not None else Path("results_comparison")
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -387,25 +340,21 @@ def mean_table(
     if csv_path.exists():
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.reader(f)
-            try:
-                existing_columns = next(reader)
-            except StopIteration:
-                existing_columns = []
-            else:
+            existing_columns = next(reader, [])
+            if existing_columns and existing_columns[0] == "MODEL":
                 for row in reader:
                     row_dict: dict[str, str] = {}
                     for idx, col in enumerate(existing_columns):
                         if idx < len(row):
                             row_dict[col] = row[idx]
                     existing_rows.append(row_dict)
+            else:
+                existing_columns = []
 
     merged_columns = list(existing_columns) if existing_columns else []
     for col in columns:
         if col not in merged_columns:
             merged_columns.append(col)
-    if not merged_columns:
-        merged_columns = list(columns)
-
     for row in formatted_data:
         row_dict: dict[str, str] = {}
         for idx, col in enumerate(columns):
@@ -421,13 +370,12 @@ def mean_table(
 
     if include_per_class:
         per_class_csv_path = target_dir / "per_class_results.csv"
-        if base_run and path_results1 is not None:
-            base_display = base_model_name if base_model_name else "YOLOv8m (base run)"
+        if path_results1 is not None:
             per_class_base = path_results1.get("per_class", {})
             if per_class_base:
-                _append_per_class_to_csv(per_class_csv_path, per_class_base, base_display)
+                _append_per_class_to_csv(per_class_csv_path, per_class_base, base_model_name)
 
-        per_class_retrained = path_results2.get("per_class", {}) if path_results2 else {}
+        per_class_retrained = path_results2.get("per_class", {})
         if per_class_retrained:
             _append_per_class_to_csv(per_class_csv_path, per_class_retrained, experiment_name)
 

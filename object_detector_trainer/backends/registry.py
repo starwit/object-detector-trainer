@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Thin backend registry.
 
 Backend-specific behavior belongs in the backend module itself. To add a new
@@ -14,6 +12,8 @@ backend, implement the same small surface as ``yolo``, ``rfdetr``, and
 
 Then add the backend to ``BACKEND_MODULES`` and ``REQUIRED_RESOLVED_FIELDS``.
 """
+
+from __future__ import annotations
 
 from importlib import import_module
 from pathlib import Path

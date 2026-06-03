@@ -8,7 +8,7 @@ from typing import Any
 from object_detector_trainer.backends.registry import build_reload_metadata, train_backend
 from object_detector_trainer.backends.training_config import resolve_training_config
 from object_detector_trainer.config.loader import load_config
-from object_detector_trainer.pipeline.model_state import persist_train_result
+from object_detector_trainer.pipeline.model_state import TRAIN_RUNS_ROOT, persist_train_result
 from object_detector_trainer.plugins.replay import build_or_update_replay_set
 
 
@@ -27,6 +27,7 @@ class TrainResult:
 def run_train_stage(args, config=None) -> TrainResult:
     cfg = config or load_config(getattr(args, "config", "params.yaml"), args=args)
     resolved_cfg = resolve_training_config(args, cfg)
+    resolved_cfg["runs_root"] = str(TRAIN_RUNS_ROOT)
     experiment_name = os.getenv("DVC_EXP_NAME")
 
     dataset_name = Path(getattr(args, "dataset_name", None) or cfg.data.dataset_name)

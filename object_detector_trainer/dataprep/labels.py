@@ -20,7 +20,13 @@ def convert_polygons_to_bboxes_inplace(label_path: Path) -> None:
     changed = False
     out: list[str] = []
     for row in rows:
+        if len(row) < 5:
+            raise ValueError(f"Malformed YOLO label row in {label_path}: {' '.join(row)!r}")
         if len(row) > 5:
+            if (len(row) - 1) % 2 != 0:
+                raise ValueError(
+                    f"Malformed YOLO polygon row in {label_path}: {' '.join(row)!r}"
+                )
             values = _poly_to_bbox_row(list(map(float, row)))
             changed = True
         else:

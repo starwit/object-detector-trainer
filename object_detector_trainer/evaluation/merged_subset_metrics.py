@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +75,9 @@ def evaluate_merged_class_subsets(
     for src_class, target_class in merged_sources.items():
         src_class_id = original_class_to_id.get(src_class)
         if src_class_id is None:
-            continue
+            raise MergedSubsetEvaluationError(
+                f"class_mapping references unknown source class {src_class!r}."
+            )
 
         matching_stems: set[str] = set()
         n_objects = 0
@@ -83,7 +87,9 @@ def evaluate_merged_class_subsets(
             scene_name = scene_dir.name
             labels_dir = scene_dir / "labels"
             if not labels_dir.exists():
-                continue
+                raise MergedSubsetEvaluationError(
+                    f"Raw test scene is missing labels directory: {labels_dir}"
+                )
             for label_file in labels_dir.glob("*.txt"):
                 if label_file.stat().st_size == 0:
                     continue
@@ -93,11 +99,12 @@ def evaluate_merged_class_subsets(
                         parts = line.strip().split()
                         if not parts:
                             continue
-                        try:
-                            if int(parts[0]) == src_class_id:
-                                file_hits += 1
-                        except ValueError:
-                            continue
+                        if len(parts) < 5:
+                            raise MergedSubsetEvaluationError(
+                                f"Malformed label row in {label_file}: {line.strip()!r}"
+                            )
+                        if int(parts[0]) == src_class_id:
+                            file_hits += 1
                 if file_hits:
                     prepared_stem = f"{label_file.stem}__scene_{scene_name}"
                     matching_stems.add(prepared_stem)
@@ -122,24 +129,22 @@ def evaluate_merged_class_subsets(
                         continue
                     shutil.copy2(img_src, temp_images / img_src.name)
                     label_src = test_labels_dir / f"{stem}.txt"
-                    if label_src.exists():
-                        shutil.copy2(label_src, temp_labels / f"{stem}.txt")
-                    else:
-                        (temp_labels / f"{stem}.txt").touch()
+                    shutil.copy2(label_src, temp_labels / f"{stem}.txt")
                     copied += 1
                     break
 
             if copied == 0:
-                logger.warning("Could not locate prepared test images for '%s' subset.", src_class)
-                continue
+                raise MergedSubsetEvaluationError(
+                    f"Could not locate prepared test images for '{src_class}' subset."
+                )
 
             temp_yaml = temp_dir / "dataset.yaml"
             temp_config = {
                 "path": str(temp_dir),
                 "train": "images",
                 "val": "images",
-                "nc": ds_config.get("nc", len(ds_config.get("names", []))),
-                "names": ds_config.get("names", {}),
+                "nc": ds_config["nc"],
+                "names": ds_config["names"],
             }
             with temp_yaml.open("w", encoding="utf-8") as handle:
                 yaml.dump(temp_config, handle)
@@ -148,22 +153,20 @@ def evaluate_merged_class_subsets(
             eval_kwargs["workers"] = 0
             eval_kwargs["batch"] = 1
 
-            from object_detector_trainer.evaluation import validate as validate_core
-
-            _, class_ids = validate_core.get_dataset_classes(str(temp_yaml))
+            _, class_ids = get_dataset_classes(str(temp_yaml))
             subset_metrics = model.val(
                 data=str(temp_yaml),
-                classes=class_ids if class_ids else None,
+                classes=class_ids,
                 verbose=False,
                 save=False,
                 plots=False,
                 **eval_kwargs,
             )
 
-            p = float(subset_metrics.results_dict.get("metrics/precision(B)", 0.0))
-            r = float(subset_metrics.results_dict.get("metrics/recall(B)", 0.0))
-            ap50 = float(subset_metrics.results_dict.get("metrics/mAP50(B)", 0.0))
-            ap = float(subset_metrics.results_dict.get("metrics/mAP50-95(B)", 0.0))
+            p = float(subset_metrics.results_dict["metrics/precision(B)"])
+            r = float(subset_metrics.results_dict["metrics/recall(B)"])
+            ap50 = float(subset_metrics.results_dict["metrics/mAP50(B)"])
+            ap = float(subset_metrics.results_dict["metrics/mAP50-95(B)"])
             f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
 
             results[src_class] = {
@@ -183,13 +186,6 @@ def evaluate_merged_class_subsets(
                 n_objects,
                 ap50,
                 ap,
-            )
-        except (OSError, ValueError, RuntimeError) as exc:
-            logger.warning(
-                "Could not evaluate merged-class subset '%s' (target '%s'): %s",
-                src_class,
-                target_class,
-                exc,
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

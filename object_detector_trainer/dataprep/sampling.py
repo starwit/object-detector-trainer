@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-from typing import Dict
 
 from object_detector_trainer.dataprep.types import ImageLabelPair
 
@@ -9,20 +8,9 @@ from object_detector_trainer.dataprep.types import ImageLabelPair
 def apply_subset_sampling(
     folder_name: str,
     pairs: list[ImageLabelPair],
-    subset_ratio: int | float | str,
+    subset_ratio: int | float,
 ) -> list[ImageLabelPair]:
     """Apply per-folder subsampling or oversampling hints."""
-    if isinstance(subset_ratio, str) and subset_ratio.isdigit():
-        count = int(subset_ratio)
-        if count == 1:
-            subset_ratio = 1.0
-        elif count >= 2:
-            pairs_copy = pairs.copy()
-            random.shuffle(pairs_copy)
-            take = min(count, len(pairs_copy))
-            print(f"Folder '{folder_name}': Using exactly {take} images (absolute count)")
-            return pairs_copy[:take]
-
     if isinstance(subset_ratio, int):
         count = int(subset_ratio)
         if count == 1:
@@ -60,16 +48,12 @@ def apply_subset_sampling(
         print(f"Folder '{folder_name}': Using all {len(pairs)} images (100%)")
         return pairs
 
-    print(
-        f"Warning: Invalid subset ratio {subset_ratio} "
-        f"for folder '{folder_name}'. Must be > 0."
-    )
-    return pairs
+    raise ValueError(f"Invalid subset ratio {subset_ratio} for folder '{folder_name}'. Must be >= 0.")
 
 
 def oversample_train_pairs(
     train_pairs: list[ImageLabelPair],
-    folder_subsets: Dict[str, int | float],
+    folder_subsets: dict[str, int | float],
 ) -> list[ImageLabelPair]:
     if not folder_subsets:
         return train_pairs
@@ -107,25 +91,21 @@ def oversample_train_pairs(
 
 
 def resolve_folder_subsets(
-    folder_subsets: Dict[str, int | float] | None,
+    folder_subsets: dict[str, int | float] | None,
     cli_overrides,
-) -> Dict[str, int | float]:
+) -> dict[str, int | float]:
     resolved = dict(folder_subsets or {})
     if not cli_overrides:
         return resolved
 
     print("Overriding folder subset configuration with command-line arguments:")
     for folder_name, ratio_str in cli_overrides:
-        try:
-            ratio = float(ratio_str)
-            if ratio < 0:
-                print(f"  Warning: Invalid ratio {ratio} for {folder_name}. Must be >= 0.")
-                continue
-            resolved[folder_name] = ratio
-            suffix = " (oversampling)" if ratio > 1 else ""
-            print(f"  {folder_name}: {ratio*100:.1f}%{suffix}")
-        except ValueError:
-            print(f"  Warning: Invalid ratio '{ratio_str}' for {folder_name}. Must be a number.")
+        ratio = float(ratio_str)
+        if ratio < 0:
+            raise ValueError(f"Invalid ratio {ratio} for {folder_name}. Must be >= 0.")
+        resolved[folder_name] = ratio
+        suffix = " (oversampling)" if ratio > 1 else ""
+        print(f"  {folder_name}: {ratio*100:.1f}%{suffix}")
     return resolved
 
 

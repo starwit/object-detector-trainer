@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 import object_detector_trainer.wrappers.rfdetr as adapter_mod
+from object_detector_trainer.wrappers.prediction_types import CocoEvalResults
 
 
 class _Detections:
@@ -135,12 +136,13 @@ def test_val_filters_classes_and_returns_expected_metric_contract(
         captured["annotations"] = annotations
         captured["detections"] = detections
         captured["categories"] = categories
-        return (
-            0.8,
-            0.6,
-            0.5,
-            0.4,
-            {"waste": {"precision": 0.8, "recall": 0.6, "map50": 0.5, "map": 0.4, "f1_score": 0.6857}},
+        return CocoEvalResults(
+            precision=0.8,
+            recall=0.6,
+            map50=0.5,
+            map50_95=0.4,
+            per_class={"waste": {"precision": 0.8, "recall": 0.6, "map50": 0.5, "map": 0.4, "f1_score": 0.6857}},
+            macro_f1=0.0,
         )
 
     monkeypatch.setattr(adapter_mod, "_compute_coco_metrics", _fake_compute_metrics)
@@ -215,5 +217,7 @@ def test_val_requires_dataset_yaml() -> None:
 
 
 def test_parse_class_names_coerces_string_keys_to_int() -> None:
-    class_names = adapter_mod._parse_class_names({"names": {"0": "waste", "1": "other"}})
+    from object_detector_trainer.wrappers.yolo_eval import parse_class_names
+
+    class_names = parse_class_names({"names": {"0": "waste", "1": "other"}})
     assert class_names == {0: "waste", 1: "other"}

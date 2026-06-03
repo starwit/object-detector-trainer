@@ -6,11 +6,7 @@ mix mapping policy with filesystem/splitting work.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Dict
-
-logger = logging.getLogger(__name__)
 
 COCO_CLASSES = {
     "person": 0,
@@ -127,7 +123,6 @@ def apply_class_mapping_config(custom_classes, class_mapping_config):
             mapped_classes.append(target_class)
             seen_targets.add(target_class)
 
-    logger.info("Class mapping applied: original=%s mapped=%s rules=%s", custom_classes, mapped_classes, source_to_target)
     return mapped_classes, source_to_target
 
 
@@ -139,11 +134,7 @@ def map_class_names_to_ids(class_names, target_mapping):
     elif isinstance(class_names, list):
         source_id_to_name = {i: name for i, name in enumerate(class_names)}
     else:
-        logger.warning(
-            "Unexpected format for class_names. Expected dict or list, got %s",
-            type(class_names),
-        )
-        return {}
+        raise ValueError(f"Expected class names as dict or list, got {type(class_names)}")
 
     target_name_to_id = {name.lower(): id_num for id_num, name in target_mapping.items()}
 
@@ -151,14 +142,8 @@ def map_class_names_to_ids(class_names, target_mapping):
         source_name_lower = source_name.lower()
         if source_name_lower in target_name_to_id:
             class_mapping[source_id] = target_name_to_id[source_name_lower]
-            logger.info(
-                "Mapped %s (%s) -> %s",
-                source_name,
-                source_id,
-                target_name_to_id[source_name_lower],
-            )
         else:
-            logger.warning("No mapping found for class '%s' (ID: %s)", source_name, source_id)
+            raise ValueError(f"No mapping found for class {source_name!r} (ID: {source_id})")
 
     return class_mapping
 
@@ -181,14 +166,10 @@ def remap_labels_with_class_mapping(
         target_name = source_to_target_map.get(source_name, source_name)
         target_id = final_name_to_id.get(target_name)
         if target_id is None:
-            logger.warning(
-                "No target id for class %r (mapped from %r) while remapping %s; keeping id %s unchanged",
-                target_name,
-                source_name,
-                label_path,
-                source_id,
+            raise ValueError(
+                f"No target id for class {target_name!r} "
+                f"(mapped from {source_name!r}) while remapping {label_path}."
             )
-            continue
         source_to_target_id[source_id] = target_id
 
     if not source_to_target_id:
@@ -198,27 +179,18 @@ def remap_labels_with_class_mapping(
     with open(label_path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) >= 5:
-                try:
-                    class_id = int(parts[0])
-                    target_id = source_to_target_id.get(class_id)
-                    if target_id is not None:
-                        parts[0] = str(target_id)
-                    else:
-                        logger.warning(
-                            "Label row in %s references unknown class id %s; leaving unchanged",
-                            label_path,
-                            class_id,
-                        )
-                    remapped_lines.append(" ".join(parts))
-                except ValueError as exc:
-                    logger.warning(
-                        "Skipping malformed label row in %s: %r (%s)",
-                        label_path,
-                        line.strip(),
-                        exc,
-                    )
-                    continue
+            if not parts:
+                continue
+            if len(parts) < 5:
+                raise ValueError(f"Malformed label row in {label_path}: {line.strip()!r}")
+            class_id = int(parts[0])
+            target_id = source_to_target_id.get(class_id)
+            if target_id is None:
+                raise ValueError(
+                    f"Label row in {label_path} references unknown class id {class_id}."
+                )
+            parts[0] = str(target_id)
+            remapped_lines.append(" ".join(parts))
 
     with open(label_path, "w", encoding="utf-8") as f:
         for line in remapped_lines:

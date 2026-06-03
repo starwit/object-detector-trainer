@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import csv
-import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
-
-import numpy as np
 
 from object_detector_trainer.utils.path_ops import link_or_copy
 
@@ -21,34 +17,32 @@ class Box:
     h: float
 
 
-def _read_gt_labels(label_path: Path) -> List[Box]:
+def _read_gt_labels(label_path: Path) -> list[Box]:
     if not label_path.exists() or label_path.stat().st_size == 0:
         return []
-    out: List[Box] = []
+    out: list[Box] = []
     with open(label_path, "r") as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) < 5:
+            if not parts:
                 continue
+            if len(parts) < 5:
+                raise ValueError(f"Malformed YOLO label line in {label_path}: {line.strip()!r}")
             c = int(float(parts[0]))
             x, y, w, h = map(float, parts[1:5])
             out.append(Box(c, 1.0, x, y, w, h))
     return out
 
 
-def _pred_boxes_from_result(result) -> List[Box]:
+def _pred_boxes_from_result(result) -> list[Box]:
     # ultralytics result.boxes exposes .cls, .conf, .xywhn
     boxes = []
-    for b in getattr(result, "boxes", []) or []:
+    for b in result.boxes:
         cls_raw = b.cls.item() if hasattr(b.cls, "item") else b.cls
         conf_raw = b.conf.item() if hasattr(b.conf, "item") else b.conf
         cls_id = int(cls_raw)
         conf = float(conf_raw)
-        xywhn = getattr(b, "xywhn", None)
-        if xywhn is None:
-            # Fallback: try xywh in pixels and approximate normalize later (not ideal)
-            continue
-        x, y, w, h = [float(v) for v in xywhn[0].tolist()]
+        x, y, w, h = [float(v) for v in b.xywhn[0].tolist()]
         boxes.append(Box(cls_id, conf, x, y, w, h))
     return boxes
 
@@ -71,7 +65,12 @@ def _iou(a: Box, b: Box) -> float:
     return inter / union
 
 
-def _match_and_score(preds: List[Box], gts: List[Box], iou_thr: float, conf_thr: float, border_conf: float) -> Tuple[int, int, int]:
+def _match_and_score(
+    preds: list[Box],
+    gts: list[Box],
+    iou_thr: float,
+    border_conf: float,
+) -> tuple[int, int, int]:
     # greedy match by IoU
     used_pred = set()
     used_gt = set()
@@ -101,7 +100,7 @@ def _match_and_score(preds: List[Box], gts: List[Box], iou_thr: float, conf_thr:
     return fn, fp, borderline
 
 
-def _append_index(index_csv: Path, rows: List[dict]) -> None:
+def _append_index(index_csv: Path, rows: list[dict]) -> None:
     index_csv.parent.mkdir(parents=True, exist_ok=True)
     header = [
         "run_id",
@@ -118,7 +117,7 @@ def _append_index(index_csv: Path, rows: List[dict]) -> None:
         if new_file:
             w.writeheader()
         for r in rows:
-            w.writerow({k: r.get(k, "") for k in header})
+            w.writerow({k: r[k] for k in header})
 
 
 def mine_hard_examples(
@@ -129,24 +128,23 @@ def mine_hard_examples(
     iou_thr: float = 0.5,
     conf_thr: float = 0.25,
     border_conf: float = 0.35,
-    seed: int = 42,
     include_empty: bool = True,
 ):
     """Return list of (img_path, lbl_path, score, fn, fp, borderline)."""
-    rng = random.Random(seed)
-    candidates: List[Tuple[Path, Path, float, int, int, int]] = []
+    candidates: list[tuple[Path, Path, float, int, int, int]] = []
 
-    img_files = [p for p in images_dir.glob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
+    img_files = [
+        p
+        for p in images_dir.glob("*")
+        if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
+    ]
     # Predict one by one to keep memory bounded; users can increase speed later if needed
     for img_path in img_files:
         label_path = labels_dir / (img_path.stem + ".txt")
         gts = _read_gt_labels(label_path)
         results = model.predict(str(img_path), conf=conf_thr, save=False, verbose=False)
-        if not results:
-            preds = []
-        else:
-            preds = _pred_boxes_from_result(results[0])
-        fn, fp, borderline = _match_and_score(preds, gts, iou_thr, conf_thr, border_conf)
+        preds = _pred_boxes_from_result(results[0])
+        fn, fp, borderline = _match_and_score(preds, gts, iou_thr, border_conf)
         score = 3 * fn + 2 * fp + 1 * borderline
         # keep hard negatives (empty gt but with fp)
         if len(gts) == 0 and (fp > 0 or include_empty):
@@ -155,13 +153,12 @@ def mine_hard_examples(
         if score > 0:
             candidates.append((img_path, label_path, float(score), fn, fp, borderline))
 
-    # Sort by score (desc) and sample top max_new
     candidates.sort(key=lambda t: t[2], reverse=True)
     return candidates[:max_new]
 
 
 def update_replay_folder(
-    candidates: List[Tuple[Path, Path, float, int, int, int]],
+    candidates: list[tuple[Path, Path, float, int, int, int]],
     run_id: str,
     dest_root: Path,
     max_total: int,
@@ -171,7 +168,7 @@ def update_replay_folder(
     index_csv = dest_root / "index.csv"
 
     # Add new items
-    added_rows: List[dict] = []
+    added_rows: list[dict] = []
     for img_path, lbl_path, score, fn, fp, borderline in candidates:
         img_name = img_path.name
         lbl_name = lbl_path.name
@@ -198,7 +195,7 @@ def update_replay_folder(
         _append_index(index_csv, added_rows)
 
     # Prune if exceeding max_total (simple oldest-first by filesystem time)
-    def _sorted_by_mtime(paths: List[Path]) -> List[Path]:
+    def _sorted_by_mtime(paths: list[Path]) -> list[Path]:
         return sorted(paths, key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
 
     imgs = list(images_out.glob("*")) if images_out.exists() else []
@@ -231,14 +228,12 @@ def build_or_update_replay_set(
     conf_thr = float(config.get("conf_thr", 0.25))
     border_conf = float(config.get("border_conf", 0.35))
     include_empty = bool(config.get("include_empty", True))
-    seed = int(config.get("seed", 42))
     dest = Path(config.get("dest", "raw_data/train/replay"))
 
     val_images = training_path / "val" / "images"
     val_labels = training_path / "val" / "labels"
     if not val_images.exists():
-        print("Replay: no validation images folder found; skipping replay mining.")
-        return
+        raise FileNotFoundError(f"Replay validation images folder not found: {val_images}")
 
     print("\n[Replay] Mining hard examples from validation split …")
     cands = mine_hard_examples(
@@ -249,7 +244,6 @@ def build_or_update_replay_set(
         iou_thr=iou_thr,
         conf_thr=conf_thr,
         border_conf=border_conf,
-        seed=seed,
         include_empty=include_empty,
     )
     if not cands:

@@ -64,6 +64,31 @@ def test_resolve_training_config_uses_cli_seed(tmp_path: Path) -> None:
     assert resolved["seed"] == 1337
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("image_size", 0, "image_size.*> 0"),
+        ("epochs", 0, "epochs.*> 0"),
+        ("batch_size", 0, "batch_size.*> 0"),
+    ],
+)
+def test_resolve_training_config_rejects_non_positive_training_values(
+    tmp_path: Path,
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    params_path = tmp_path / "params.yaml"
+    _write_minimal_config(params_path)
+    payload = yaml.safe_load(params_path.read_text(encoding="utf-8"))
+    payload["train"][field] = value
+    params_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cfg = load_config(params_path)
+
+    with pytest.raises(ValueError, match=message):
+        resolve_training_config(SimpleNamespace(seed=42, model=None), cfg)
+
+
 def test_resolve_training_config_requires_explicit_rfdetr_variant(tmp_path: Path) -> None:
     params_path = tmp_path / "params.yaml"
     payload = {

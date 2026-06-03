@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Dict
 
 import yaml
 
@@ -12,14 +11,6 @@ from object_detector_trainer.dataprep.sampling import apply_subset_sampling
 from object_detector_trainer.dataprep.types import ImageLabelPair, ProcessedFolder
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
-
-
-def sorted_iterdir(path: Path) -> list[Path]:
-    return sorted(path.iterdir(), key=lambda p: p.name)
-
-
-def sorted_glob(paths) -> list[Path]:
-    return sorted(paths, key=lambda p: p.name)
 
 
 def _contains_supported_images(root: Path) -> bool:
@@ -32,7 +23,7 @@ def _contains_supported_images(root: Path) -> bool:
 def check_for_test_images(test_image_input_path: Path) -> bool:
     if not test_image_input_path.exists():
         return False
-    for image_folder in sorted_iterdir(test_image_input_path):
+    for image_folder in sorted(test_image_input_path.iterdir(), key=lambda p: p.name):
         if image_folder.is_dir() and _contains_supported_images(image_folder):
             return True
     return False
@@ -50,6 +41,11 @@ def remap_yaml_dataset_labels(dataset_dir: Path, target_class_mapping: dict[int,
         dataset_config = yaml.safe_load(handle)
 
     class_mapping = map_class_names_to_ids(dataset_config["names"], target_class_mapping)
+    if not class_mapping:
+        raise ValueError(
+            f"No classes in {yaml_file} can be mapped to target classes: "
+            f"{list(target_class_mapping.values())}"
+        )
 
     for label_file in dataset_dir.rglob("*.txt"):
         if "labels" not in str(label_file.parent):
@@ -66,101 +62,133 @@ def remap_yaml_dataset_labels(dataset_dir: Path, target_class_mapping: dict[int,
                     parts[0] = str(class_mapping[orig_class_id])
                     new_lines.append(" ".join(parts) + "\n")
                 else:
-                    print(f"Skipping label with unmapped class ID: {orig_class_id}")
+                    raise ValueError(
+                        f"Label {label_file} references unmapped class ID {orig_class_id}."
+                    )
 
         with label_file.open("w", encoding="utf-8") as handle:
             handle.writelines(new_lines)
 
 
-def process_cvat_folder(
-    some_folder: Path,
-    folder_to_process: Path,
-    scene_name: str,
-    target_class_mapping: Dict[int, str],
-    folder_subsets: Dict[str, int | float],
-    temp_folders: list[Path],
-) -> ProcessedFolder:
-    folder_pairs: list[ImageLabelPair] = []
-    empty_label_count = 0
-    skip_count = 0
+def _copy_and_remap_yaml_dataset(
+    *,
+    source_folder: Path,
+    temp_folder: Path,
+    target_class_mapping: dict[int, str],
+    error_label: str,
+) -> Path:
+    if temp_folder.exists():
+        shutil.rmtree(temp_folder)
+    shutil.copytree(source_folder, temp_folder)
+    try:
+        remap_yaml_dataset_labels(temp_folder, target_class_mapping)
+    except (KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+        shutil.rmtree(temp_folder, ignore_errors=True)
+        raise ValueError(
+            f"Failed to apply class mapping for {error_label} '{source_folder.name}': {exc}"
+        ) from exc
+    return temp_folder
 
-    train_txt = folder_to_process / "train.txt"
+
+def _move_pairs_to_temp_folder(
+    pairs: list[ImageLabelPair],
+    *,
+    source_folder: Path,
+    temp_folder: Path,
+) -> list[ImageLabelPair]:
+    return [
+        ImageLabelPair(
+            temp_folder.joinpath(pair.image.relative_to(source_folder)),
+            temp_folder.joinpath(pair.label.relative_to(source_folder)),
+            pair.scene,
+        )
+        for pair in pairs
+    ]
+
+
+def process_cvat_folder(
+    source_folder: Path,
+    target_class_mapping: dict[int, str],
+    folder_subsets: dict[str, int | float],
+) -> ProcessedFolder:
+    scene_name = source_folder.name
+    folder_pairs: list[ImageLabelPair] = []
+    temp_folders: list[Path] = []
+    empty_label_count = 0
+
+    train_txt = source_folder / "train.txt"
     with train_txt.open("r", encoding="utf-8") as handle:
-        image_paths = [line.strip() for line in handle.readlines()]
+        image_paths = [line.strip() for line in handle if line.strip()]
 
     for image_rel_path in image_paths:
         path = Path(image_rel_path)
-        image_rel_path = Path(*path.parts[1:])
-
-        image_path = folder_to_process / image_rel_path
-        label_rel_path = Path("labels") / image_rel_path.relative_to("images").with_suffix(".txt")
-        label_path = folder_to_process / label_rel_path
-
-        if image_path.exists():
-            if not label_path.exists() or label_path.stat().st_size == 0:
-                label_path.parent.mkdir(parents=True, exist_ok=True)
-                label_path.touch()
-                empty_label_count += 1
-            convert_polygons_to_bboxes_inplace(label_path)
-            folder_pairs.append(ImageLabelPair(image_path, label_path, scene_name))
-        else:
-            skip_count += 1
-
-    if (folder_to_process / "data.yaml").exists():
-        temp_folder = some_folder.parent / f"{some_folder.name}_temp"
-        if temp_folder.exists():
-            shutil.rmtree(temp_folder)
-        shutil.copytree(folder_to_process, temp_folder)
-        try:
-            remap_yaml_dataset_labels(temp_folder, target_class_mapping)
-        except (KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
-            shutil.rmtree(temp_folder, ignore_errors=True)
+        if path.parts and path.parts[0] == "data":
+            path = Path(*path.parts[1:])
+        if not path.parts or path.parts[0] != "images":
             raise ValueError(
-                f"Failed to apply class mapping for CVAT folder '{folder_to_process.name}': {exc}"
-            ) from exc
-
-        temp_folders.append(temp_folder)
-        folder_pairs = [
-            ImageLabelPair(
-                temp_folder.joinpath(pair.image.relative_to(folder_to_process)),
-                temp_folder.joinpath(pair.label.relative_to(folder_to_process)),
-                pair.scene,
+                f"CVAT train.txt path must point under images/: {image_rel_path!r}"
             )
-            for pair in folder_pairs
-        ]
 
-    folder_name = some_folder.name
-    if folder_name in folder_subsets:
-        folder_pairs = apply_subset_sampling(
-            folder_name,
+        image_path = source_folder / path
+        label_rel_path = Path("labels") / path.relative_to("images").with_suffix(".txt")
+        label_path = source_folder / label_rel_path
+
+        if not image_path.exists():
+            raise FileNotFoundError(
+                f"CVAT train.txt references an image that does not exist: {image_path}"
+            )
+        if not label_path.exists() or label_path.stat().st_size == 0:
+            label_path.parent.mkdir(parents=True, exist_ok=True)
+            label_path.touch()
+            empty_label_count += 1
+        convert_polygons_to_bboxes_inplace(label_path)
+        folder_pairs.append(ImageLabelPair(image_path, label_path, scene_name))
+
+    if (source_folder / "data.yaml").exists():
+        temp_folder = source_folder.parent / f"{source_folder.name}_temp"
+        temp_folders.append(
+            _copy_and_remap_yaml_dataset(
+                source_folder=source_folder,
+                temp_folder=temp_folder,
+                target_class_mapping=target_class_mapping,
+                error_label="CVAT folder",
+            )
+        )
+        folder_pairs = _move_pairs_to_temp_folder(
             folder_pairs,
-            folder_subsets[folder_name],
+            source_folder=source_folder,
+            temp_folder=temp_folder,
         )
 
-    return ProcessedFolder(folder_pairs, temp_folders, empty_label_count, skip_count)
+    if scene_name in folder_subsets:
+        folder_pairs = apply_subset_sampling(
+            scene_name,
+            folder_pairs,
+            folder_subsets[scene_name],
+        )
+
+    return ProcessedFolder(folder_pairs, temp_folders, empty_label_count)
 
 
 def process_manual_folder(
-    some_folder: Path,
-    folder_to_process: Path,
-    scene_name: str,
-    target_class_mapping: Dict[int, str],
-    folder_subsets: Dict[str, int | float],
-    temp_folders: list[Path],
+    source_folder: Path,
+    target_class_mapping: dict[int, str],
+    folder_subsets: dict[str, int | float],
 ) -> ProcessedFolder:
+    scene_name = source_folder.name
     temp_pairs: list[ImageLabelPair] = []
+    temp_folders: list[Path] = []
     empty_label_count = 0
 
-    images_folder = folder_to_process / "images"
-    labels_folder = folder_to_process / "labels"
+    images_folder = source_folder / "images"
+    labels_folder = source_folder / "labels"
     if not images_folder.exists():
-        print(f"Skipping {folder_to_process.name}: Missing 'images' folder.")
-        return ProcessedFolder([], temp_folders, empty_label_count)
+        raise FileNotFoundError(f"Missing images folder: {images_folder}")
 
     if not labels_folder.exists():
         labels_folder.mkdir(parents=True, exist_ok=True)
 
-    for image_file in sorted_glob(images_folder.glob("*")):
+    for image_file in sorted(images_folder.glob("*"), key=lambda p: p.name):
         if image_file.is_file() and image_file.suffix.lower() in _IMAGE_SUFFIXES:
             label_file = labels_folder / image_file.with_suffix(".txt").name
             if not label_file.exists() or label_file.stat().st_size == 0:
@@ -169,57 +197,38 @@ def process_manual_folder(
             convert_polygons_to_bboxes_inplace(label_file)
             temp_pairs.append(ImageLabelPair(image_file, label_file, scene_name))
 
-    data_yaml_path = folder_to_process / "data.yaml"
+    data_yaml_path = source_folder / "data.yaml"
     if data_yaml_path.exists():
-        print(f"Found data.yaml in manual structure: {folder_to_process.name}")
-        temp_folder = some_folder.parent / f"{some_folder.name}_temp"
+        print(f"Found data.yaml in manual structure: {source_folder.name}")
+        temp_folder = source_folder.parent / f"{source_folder.name}_temp"
         with data_yaml_path.open("r", encoding="utf-8") as handle:
             yaml_config = yaml.safe_load(handle) or {}
         if not isinstance(yaml_config, dict):
             raise ValueError(
-                f"Invalid data.yaml in '{folder_to_process.name}': expected mapping, got {type(yaml_config)}"
+                f"Invalid data.yaml in '{source_folder.name}': expected mapping, got {type(yaml_config)}"
             )
         if "names" not in yaml_config:
-            raise ValueError(f"Invalid data.yaml in '{folder_to_process.name}': missing 'names' section")
+            raise ValueError(f"Invalid data.yaml in '{source_folder.name}': missing 'names' section")
 
-        yaml_classes = yaml_config["names"]
-        mapping = map_class_names_to_ids(yaml_classes, target_class_mapping)
-        if not mapping:
-            print(f"Warning: No classes in {data_yaml_path} can be mapped to target classes")
-            if isinstance(yaml_classes, list):
-                source_classes = yaml_classes
-            else:
-                source_classes = list(yaml_classes.values())
-            print(f"Source classes: {source_classes}")
-            print(f"Target classes: {list(target_class_mapping.values())}")
-
-        if temp_folder.exists():
-            shutil.rmtree(temp_folder)
-        shutil.copytree(folder_to_process, temp_folder)
-        try:
-            remap_yaml_dataset_labels(temp_folder, target_class_mapping)
-        except (KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
-            shutil.rmtree(temp_folder, ignore_errors=True)
-            raise ValueError(
-                f"Failed to apply class mapping for folder '{folder_to_process.name}': {exc}"
-            ) from exc
-
-        temp_folders.append(temp_folder)
-        temp_pairs = [
-            ImageLabelPair(
-                temp_folder.joinpath(pair.image.relative_to(folder_to_process)),
-                temp_folder.joinpath(pair.label.relative_to(folder_to_process)),
-                pair.scene,
+        temp_folders.append(
+            _copy_and_remap_yaml_dataset(
+                source_folder=source_folder,
+                temp_folder=temp_folder,
+                target_class_mapping=target_class_mapping,
+                error_label="folder",
             )
-            for pair in temp_pairs
-        ]
-
-    folder_name = some_folder.name
-    if folder_name in folder_subsets:
-        temp_pairs = apply_subset_sampling(
-            folder_name,
+        )
+        temp_pairs = _move_pairs_to_temp_folder(
             temp_pairs,
-            folder_subsets[folder_name],
+            source_folder=source_folder,
+            temp_folder=temp_folder,
+        )
+
+    if scene_name in folder_subsets:
+        temp_pairs = apply_subset_sampling(
+            scene_name,
+            temp_pairs,
+            folder_subsets[scene_name],
         )
 
     return ProcessedFolder(temp_pairs, temp_folders, empty_label_count)
@@ -230,6 +239,4 @@ __all__ = [
     "process_cvat_folder",
     "process_manual_folder",
     "remap_yaml_dataset_labels",
-    "sorted_glob",
-    "sorted_iterdir",
 ]

@@ -1,26 +1,15 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
-from typing import Any
 
-from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes as _get_dataset_classes
+from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes, load_yolo_dataset_yaml
 from object_detector_trainer.evaluation import scene_metrics
 from object_detector_trainer.evaluation.reports import (
     append_results_to_csv,
     create_formatted_table,
     write_merged_class_results,
 )
-
-logger = logging.getLogger(__name__)
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def evaluate_and_log_model_results(
@@ -41,7 +30,7 @@ def evaluate_and_log_model_results(
         tuple: (metadata, metrics_dict)
     """
     dataset_yaml_path = test_path / "dataset.yaml"
-    class_names, class_ids = get_dataset_classes(dataset_yaml_path)
+    _, class_ids = get_dataset_classes(dataset_yaml_path)
 
     results = validate_model(
         model,
@@ -53,18 +42,14 @@ def evaluate_and_log_model_results(
         metrics_json_path=metrics_json_path,
     )
 
-    model_backend = getattr(model, "model_backend", None)
-    if not model_backend:
-        raise ValueError(f"Model {model_name!r} does not declare model_backend.")
-
     metadata = {
         "experiment_name": model_name,
         "split_parameters": {
             "val_split": val_split,
         },
         "num_epochs": train_epochs,
-        "model_size": model.model_name if hasattr(model, "model_name") else "Unknown",
-        "model_backend": str(model_backend),
+        "model_size": str(model.model_name),
+        "model_backend": str(model.model_backend),
         "image_size": image_size,
     }
     model_variant = getattr(model, "model_variant", None)
@@ -88,14 +73,58 @@ def evaluate_and_log_model_results(
     return metadata, results
 
 
-def get_dataset_classes(dataset_yaml_path):
-    """Return (class_id_to_name, class_id_list) from dataset.yaml."""
-    return _get_dataset_classes(dataset_yaml_path)
+_ZERO_CLASS_METRICS = {
+    "precision": 0.0,
+    "recall": 0.0,
+    "map50": 0.0,
+    "map": 0.0,
+    "f1_score": 0.0,
+}
+
+
+def _present_class_names(data, names: dict[int, str]) -> set[str]:
+    dataset_yaml = load_yolo_dataset_yaml(data)
+    dataset_root = Path(dataset_yaml.get("path") or Path(data).parent)
+    if not dataset_root.is_absolute():
+        dataset_root = Path(data).parent / dataset_root
+
+    val_path = Path(dataset_yaml.get("val", "val/images"))
+    if not val_path.is_absolute():
+        val_path = dataset_root / val_path
+    label_dir = val_path.parent / "labels" if val_path.name == "images" else val_path
+
+    present: set[str] = set()
+    for label_file in sorted(label_dir.glob("*.txt")):
+        with label_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts:
+                    cls_id = int(parts[0])
+                    if cls_id in names:
+                        present.add(names[cls_id])
+    return present
+
+
+def _normalize_per_class_metrics(
+    per_class: dict[str, dict[str, float]],
+    present_class_names: set[str],
+) -> dict[str, dict[str, float]]:
+    if not present_class_names:
+        return {}
+    normalized = {
+        class_name: dict(per_class[class_name])
+        for class_name in sorted(present_class_names)
+        if class_name in per_class
+    }
+    for class_name in sorted(present_class_names - set(normalized)):
+        normalized[class_name] = dict(_ZERO_CLASS_METRICS)
+    return normalized
 
 
 def _extract_per_class_metrics(metrics, data):
-    """Extract per-class metrics from model validation results."""
-    names, _ = _get_dataset_classes(data)
+    """Extract per-class metrics for classes present in the evaluated labels."""
+    names, _ = get_dataset_classes(data)
+    present_class_names = _present_class_names(data, names)
 
     per_class = {}
 
@@ -107,7 +136,7 @@ def _extract_per_class_metrics(metrics, data):
             ap_vals = box.ap
             for i, cls_idx in enumerate(ap_class_idx):
                 cls_id = int(cls_idx)
-                cls_name = names.get(cls_id, f"class_{cls_id}")
+                cls_name = names[cls_id]
                 p = float(box.p[i])
                 r = float(box.r[i])
                 a50 = float(ap50_vals[i])
@@ -120,11 +149,11 @@ def _extract_per_class_metrics(metrics, data):
                     "map": ap,
                     "f1_score": f1,
                 }
-        return per_class
+        return _normalize_per_class_metrics(per_class, present_class_names)
 
     native_per_class = getattr(metrics, "per_class", None)
     if native_per_class:
-        return dict(native_per_class)
+        return _normalize_per_class_metrics(dict(native_per_class), present_class_names)
 
     return {}
 
@@ -146,9 +175,9 @@ def validate_model(model, data, class_ids=None, write_json=False, metrics_json_p
 
     spd = metrics.speed
     ms_per_frame = (
-        float(spd.get("preprocess", 0.0))
-        + float(spd.get("inference", 0.0))
-        + float(spd.get("postprocess", 0.0))
+        float(spd["preprocess"])
+        + float(spd["inference"])
+        + float(spd["postprocess"])
     )
 
     precision = float(metrics.results_dict["metrics/precision(B)"])
@@ -157,9 +186,8 @@ def validate_model(model, data, class_ids=None, write_json=False, metrics_json_p
     map50_95 = float(metrics.results_dict["metrics/mAP50-95(B)"])
     fitness = float(metrics.fitness)
 
-    f1_from_model = _safe_float(metrics.results_dict.get("metrics/f1(B)"))
-    if f1_from_model is not None:
-        f1_score = f1_from_model
+    if "metrics/f1(B)" in metrics.results_dict:
+        f1_score = float(metrics.results_dict["metrics/f1(B)"])
     else:
         f1_score = (
             2 * (precision * recall) / (precision + recall)
@@ -184,12 +212,8 @@ def validate_model(model, data, class_ids=None, write_json=False, metrics_json_p
     if per_class:
         metrics_dict["per_class"] = per_class
 
-    try:
-        scene_metrics_dict = scene_metrics.calculate_scene_metrics(model, data, **kwargs)
-    except scene_metrics.SceneMetricsError as exc:
-        logger.warning("Skipping scene metrics for %s: %s", data, exc)
-    else:
-        metrics_dict.update(scene_metrics_dict)
+    scene_metrics_dict = scene_metrics.calculate_scene_metrics(model, data, **kwargs)
+    metrics_dict.update(scene_metrics_dict)
 
     if write_json:
         output_path = Path(metrics_json_path) if metrics_json_path is not None else Path("metrics.json")
@@ -203,7 +227,6 @@ __all__ = [
     "append_results_to_csv",
     "create_formatted_table",
     "evaluate_and_log_model_results",
-    "get_dataset_classes",
     "validate_model",
     "write_merged_class_results",
 ]

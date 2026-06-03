@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 import object_detector_trainer.wrappers.rtmdet as adapter_mod
+from object_detector_trainer.wrappers.prediction_types import CocoEvalResults
 
 
 def test_predict_converts_detections_to_yolo_like_result() -> None:
@@ -93,12 +94,13 @@ def test_val_filters_classes_and_returns_expected_metric_contract(
         captured["annotations"] = annotations
         captured["detections"] = detections
         captured["categories"] = categories
-        return (
-            0.8,
-            0.6,
-            0.5,
-            0.4,
-            {"waste": {"precision": 0.8, "recall": 0.6, "map50": 0.5, "map": 0.4, "f1_score": 0.6857}},
+        return CocoEvalResults(
+            precision=0.8,
+            recall=0.6,
+            map50=0.5,
+            map50_95=0.4,
+            per_class={"waste": {"precision": 0.8, "recall": 0.6, "map50": 0.5, "map": 0.4, "f1_score": 0.6857}},
+            macro_f1=0.0,
         )
 
     monkeypatch.setattr(adapter_mod, "_compute_coco_metrics", _fake_compute_metrics)
@@ -119,6 +121,41 @@ def test_val_filters_classes_and_returns_expected_metric_contract(
     assert metrics.fitness == pytest.approx(0.41)
     assert "waste" in metrics.per_class
     assert metrics.speed["inference"] >= 0.0
+
+
+def test_val_rejects_label_class_not_declared_in_dataset_yaml(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset_bad_label"
+    images_dir = dataset_root / "val" / "images"
+    labels_dir = dataset_root / "val" / "labels"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    img = np.zeros((100, 200, 3), dtype=np.uint8)
+    cv2.imwrite(str(images_dir / "img1.jpg"), img)
+    (labels_dir / "img1.txt").write_text("99 0.2 0.2 0.2 0.2\n", encoding="utf-8")
+
+    dataset_yaml = tmp_path / "dataset_bad_label.yaml"
+    with open(dataset_yaml, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            {
+                "path": str(dataset_root),
+                "val": "val/images",
+                "names": ["waste"],
+            },
+            f,
+            sort_keys=False,
+        )
+
+    def _infer(_model, _img):
+        return {
+            "bboxes": np.empty((0, 4), dtype=np.float32),
+            "scores": np.empty(0, dtype=np.float32),
+            "labels": np.empty(0, dtype=np.int64),
+        }
+
+    adapter = adapter_mod.RTMDetModelAdapter(object(), class_names={0: "waste"}, infer_fn=_infer)
+    with pytest.raises(ValueError, match="not present in dataset.yaml"):
+        adapter.val(data=str(dataset_yaml), conf=0.25)
 
 
 def test_val_real_coco_metrics_path_with_perfect_detection(tmp_path: Path) -> None:

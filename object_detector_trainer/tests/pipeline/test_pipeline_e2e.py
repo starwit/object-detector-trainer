@@ -237,7 +237,7 @@ def test_prepare_stage_fails_when_no_training_data(stubbed_pipeline: StubYOLO):
 
     args = build_args(dataset_name)
 
-    with pytest.raises(ValueError, match="Prepare stage produced 0 training frames"):
+    with pytest.raises(FileNotFoundError, match="Input path not found"):
         run_prepare_stage(args)
 
 
@@ -455,7 +455,7 @@ def test_train_stage_builds_replay_set_when_auto_replay_enabled(
             return [_Result()]
 
     def _fake_train_backend(*_args, **_kwargs):
-        run_dir = workspace / "runs" / "replay-contract"
+        run_dir = workspace / ".dvc_artifacts" / "train_runs" / "replay-contract"
         (run_dir / "weights").mkdir(parents=True, exist_ok=True)
         (run_dir / "weights" / "best.pt").write_bytes(b"replay-trained-weights")
         return _ReplayModel(), run_dir, "replay-contract", 320, 1
@@ -474,4 +474,4 @@ def test_train_stage_builds_replay_set_when_auto_replay_enabled(
     index_csv = replay_root / "index.csv"
     assert index_csv.exists()
     assert "replay-contract" in index_csv.read_text(encoding="utf-8")
-    assert result.train_output_dir == workspace / "runs" / "replay-contract"
+    assert result.train_output_dir == workspace / ".dvc_artifacts" / "train_runs" / "replay-contract"

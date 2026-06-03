@@ -11,6 +11,7 @@ import pytest
 
 from object_detector_trainer.backends.registry import normalize_backend_name
 from object_detector_trainer.cli import run_all_stages
+from object_detector_trainer.pipeline.bootstrap_stage import run_bootstrap_stage
 from object_detector_trainer.pipeline.evaluate_stage import run_evaluate_stage
 from object_detector_trainer.pipeline.prepare_stage import run_prepare_stage
 from object_detector_trainer.pipeline.train_stage import run_train_stage
@@ -208,10 +209,66 @@ def _write_contract_params(workspace: Path, *, dataset_name: str, model: str) ->
         raise AssertionError(f"Unhandled backend for contract setup: {backend!r}")
 
 
+def test_bootstrap_validates_model_config_before_asset_bootstrap(
+    contract_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_key = representative_model_key_for_backend("rfdetr")
+    write_params_yaml(
+        contract_workspace,
+        {
+            "train": {"model": model_key},
+            "models": {
+                model_key: {
+                    "resolution": 1279,
+                }
+            },
+        },
+    )
+
+    asset_bootstrap_called = False
+
+    def _unexpected_asset_bootstrap(*args, **kwargs):
+        nonlocal asset_bootstrap_called
+        asset_bootstrap_called = True
+        raise AssertionError("asset bootstrap should not run for invalid model config")
+
+    monkeypatch.setattr(
+        "object_detector_trainer.pipeline.bootstrap_stage.bootstrap_model_assets",
+        _unexpected_asset_bootstrap,
+    )
+
+    args = SimpleNamespace(
+        config="params.yaml",
+        model=model_key,
+        all_models=False,
+        seed=42,
+    )
+    with pytest.raises(ValueError, match="RF-DETR resolution 1279 is not divisible"):
+        run_bootstrap_stage(args)
+    assert not asset_bootstrap_called
+
+
+def test_prepare_reports_when_test_split_is_ignored_for_explicit_test_folder(
+    contract_workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    create_minimal_dataset(contract_workspace)
+    model_key = representative_model_key_for_backend("yolo")
+    _write_contract_params(contract_workspace, dataset_name="contract-explicit-test", model=model_key)
+
+    args = _contract_args(dataset_name="contract-explicit-test", model=model_key)
+    args.test_split = 0.4
+    run_prepare_stage(args)
+
+    captured = capsys.readouterr()
+    assert "prepare.test_split is ignored" in captured.out
+
+
 def _patch_lightweight_trainers(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     def _mk_runner(backend: str):
         def _runner(*args, **kwargs):
-            run_dir = workspace / "runs" / f"{backend}-contract"
+            run_dir = workspace / ".dvc_artifacts" / "train_runs" / f"{backend}-contract"
             (run_dir / "weights").mkdir(parents=True, exist_ok=True)
             (run_dir / "weights" / "best.pt").write_bytes(b"trained-stub")
             model = _ContractModel(model_name=f"{backend}-contract", model_backend=backend, image_size=320)
@@ -246,15 +303,17 @@ def test_stage_contract_prepare_train_evaluate_all(
 
     train_out = run_train_stage(args)
     assert train_out is not None
-    assert list((contract_workspace / "runs").glob("**/weights/best.pt"))
+    assert list((contract_workspace / ".dvc_artifacts" / "train_runs").glob("**/weights/best.pt"))
+    assert not (contract_workspace / "runs").exists()
     assert not (contract_workspace / "results_comparison" / "results.csv").exists()
 
     run_evaluate_stage(args, train_result=train_out)
     _assert_numeric_metric_contract(contract_workspace / "metrics.json")
     _assert_summary_only_results(contract_workspace / "results_comparison")
-    assert (train_out.train_output_dir / "metadata.yaml").exists()
-    assert (train_out.train_output_dir / "results.csv").exists()
-    assert (train_out.train_output_dir / "results.txt").exists()
+    published_run_dir = contract_workspace / "runs" / train_out.train_output_dir.name
+    assert (published_run_dir / "metadata.yaml").exists()
+    assert (published_run_dir / "results.csv").exists()
+    assert (published_run_dir / "results.txt").exists()
 
     # all-stage flow should also satisfy the same contracts end-to-end
     create_minimal_dataset(contract_workspace)

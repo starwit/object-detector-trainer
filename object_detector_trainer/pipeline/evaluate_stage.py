@@ -12,9 +12,11 @@ from object_detector_trainer.config.loader import load_config
 from object_detector_trainer.evaluation import reports, validate
 from object_detector_trainer.evaluation import merged_subset_metrics, visual_comparison
 from object_detector_trainer.pipeline.model_state import (
+    PUBLISHED_RUNS_ROOT,
+    PUBLISHED_TRAIN_RESULT_PATH,
     load_model_from_weights,
     load_persisted_train_result,
-    resolve_baseline_model,
+    persist_train_result,
 )
 from object_detector_trainer.utils.path_ops import resolve_workspace_path
 
@@ -32,6 +34,7 @@ class EvaluationContext:
     train_epochs: int
     baseline_weights_path: str
     params: dict
+    reload_metadata: dict
 
 
 def _organize_training_outputs(
@@ -45,10 +48,8 @@ def _organize_training_outputs(
 
     train_dataset_yaml_path = training_path / "dataset.yaml"
     test_dataset_yaml_path = test_path / "dataset.yaml"
-    if train_dataset_yaml_path.exists():
-        shutil.copy2(train_dataset_yaml_path, train_output_dir / "train_dataset.yaml")
-    if test_dataset_yaml_path.exists():
-        shutil.copy2(test_dataset_yaml_path, train_output_dir / "test_dataset.yaml")
+    shutil.copy2(train_dataset_yaml_path, train_output_dir / "train_dataset.yaml")
+    shutil.copy2(test_dataset_yaml_path, train_output_dir / "test_dataset.yaml")
 
     plots_dir = train_output_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -59,6 +60,18 @@ def _organize_training_outputs(
 
     logger.info("Experiment data organized in %s", train_output_dir)
     logger.info("Plots saved to %s", plots_dir)
+
+
+def _publish_train_output(internal_run_dir: Path) -> Path:
+    if not internal_run_dir.exists():
+        raise FileNotFoundError(f"Trained run directory not found: {internal_run_dir}")
+
+    published_run_dir = PUBLISHED_RUNS_ROOT / internal_run_dir.name
+    if published_run_dir.exists():
+        shutil.rmtree(published_run_dir)
+    published_run_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(internal_run_dir, published_run_dir)
+    return published_run_dir
 
 
 def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
@@ -86,6 +99,7 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
             train_epochs=int(persisted.train_epochs),
             baseline_weights_path=baseline_weights_path,
             params=cfg.model_dump(),
+            reload_metadata=persisted.reload_metadata,
         )
 
     return EvaluationContext(
@@ -98,6 +112,7 @@ def _build_evaluation_context(args, cfg, train_result) -> EvaluationContext:
         train_epochs=int(train_result.train_epochs),
         baseline_weights_path=baseline_weights_path,
         params=cfg.model_dump(),
+        reload_metadata=train_result.reload_metadata,
     )
 
 
@@ -106,8 +121,10 @@ def _append_merged_subset_metrics_to_json(
     merged_metrics: dict[str, dict],
     metrics_path: Path,
 ) -> None:
-    if not metrics_path.exists() or not merged_metrics:
+    if not merged_metrics:
         return
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"Metrics JSON not found: {metrics_path}")
 
     with metrics_path.open("r", encoding="utf-8") as f:
         metrics_data = json.load(f)
@@ -129,14 +146,15 @@ def _run_merged_class_evaluation(
     baseline_model: object | None,
     baseline_display_name: str | None,
 ) -> None:
-    params = context.params if isinstance(context.params, dict) else {}
-    data_cfg = params.get("data", {}) if isinstance(params, dict) else {}
-    custom_classes = list(data_cfg.get("custom_classes") or [])
-    class_mapping_config = dict(data_cfg.get("class_mapping") or {})
+    data_cfg = context.params["data"]
+    custom_classes = list(data_cfg["custom_classes"] or [])
+    class_mapping_config = dict(data_cfg["class_mapping"] or {})
     raw_test_path = Path("raw_data") / "test"
 
-    if not class_mapping_config or not raw_test_path.exists():
+    if not class_mapping_config:
         return
+    if not raw_test_path.exists():
+        raise FileNotFoundError(f"Raw test path not found for merged-class evaluation: {raw_test_path}")
 
     has_merged = any(
         src != target
@@ -149,35 +167,27 @@ def _run_merged_class_evaluation(
     merged_class_results: list[tuple[str, dict]] = []
 
     if baseline_model is not None:
-        try:
-            baseline_merged = merged_subset_metrics.evaluate_merged_class_subsets(
-                baseline_model,
-                baseline_display_name or "baseline",
-                context.test_path,
-                raw_test_path,
-                class_mapping_config,
-                custom_classes,
-                imgsz=context.image_size,
-            )
-        except merged_subset_metrics.MergedSubsetEvaluationError as exc:
-            logger.warning("Skipping merged-class subset evaluation for baseline: %s", exc)
-            baseline_merged = {}
-        if baseline_merged:
-            merged_class_results.append((baseline_display_name or "baseline", baseline_merged))
-
-    try:
-        trained_merged = merged_subset_metrics.evaluate_merged_class_subsets(
-            context.model,
-            context.experiment_name,
+        baseline_merged = merged_subset_metrics.evaluate_merged_class_subsets(
+            baseline_model,
+            baseline_display_name or "baseline",
             context.test_path,
             raw_test_path,
             class_mapping_config,
             custom_classes,
             imgsz=context.image_size,
         )
-    except merged_subset_metrics.MergedSubsetEvaluationError as exc:
-        logger.warning("Skipping merged-class subset evaluation for trained model: %s", exc)
-        trained_merged = {}
+        if baseline_merged:
+            merged_class_results.append((baseline_display_name or "baseline", baseline_merged))
+
+    trained_merged = merged_subset_metrics.evaluate_merged_class_subsets(
+        context.model,
+        context.experiment_name,
+        context.test_path,
+        raw_test_path,
+        class_mapping_config,
+        custom_classes,
+        imgsz=context.image_size,
+    )
     if trained_merged:
         merged_class_results.append((context.experiment_name, trained_merged))
 
@@ -218,8 +228,8 @@ def _resolve_optional_baseline_model(
     - If metadata.yaml exists next to the baseline path, we consider a promoted
       baseline to exist, and missing/empty weights is an error (likely a missing
       `dvc pull`).
-    - If weights exist and are non-empty, we load strictly via resolve_baseline_model()
-      (which requires valid metadata including model_backend).
+    - If weights exist and are non-empty, load_model_from_weights() requires
+      valid metadata including model_backend.
     """
 
     candidate = resolve_workspace_path(baseline_weights_path)
@@ -255,7 +265,7 @@ def _resolve_optional_baseline_model(
         )
         return None, None
 
-    baseline_model, baseline_display_name = resolve_baseline_model(str(candidate))
+    baseline_model, baseline_display_name = load_model_from_weights(str(candidate))
     return baseline_model, baseline_display_name
 
 
@@ -266,7 +276,7 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
 
     context = _build_evaluation_context(args, cfg, train_result)
 
-    evaluation_output_dir = context.train_output_dir
+    evaluation_output_dir = _publish_train_output(context.train_output_dir)
     evaluation_output_dir.mkdir(parents=True, exist_ok=True)
     summary_output_dir = Path("results_comparison")
     summary_output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,7 +340,6 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
         baseline_results,
         retrained_results,
         context.experiment_name,
-        baseline_results is not None,
         baseline_display_name,
         output_dir=evaluation_output_dir,
         include_per_class=True,
@@ -340,9 +349,19 @@ def run_evaluate_stage(args, train_result=None, config=None) -> None:
         baseline_results,
         retrained_results,
         context.experiment_name,
-        baseline_results is not None,
         baseline_display_name,
         output_dir=summary_output_dir,
         include_per_class=False,
         include_details=False,
+    )
+
+    persist_train_result(
+        train_output_dir=evaluation_output_dir,
+        experiment_name=context.experiment_name,
+        image_size=context.image_size,
+        train_epochs=context.train_epochs,
+        training_path=context.training_path,
+        test_path=context.test_path,
+        reload_metadata=context.reload_metadata,
+        marker_path=PUBLISHED_TRAIN_RESULT_PATH,
     )

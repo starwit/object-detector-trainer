@@ -66,7 +66,6 @@ def resolve_config(
         "rfdetr_lr": model_cfg.get("lr"),
         "rfdetr_checkpoint": str(checkpoint_path),
         "rfdetr_grad_ckpt": model_cfg.get("gradient_checkpointing"),
-        "rfdetr_extra": model_cfg.get("extra_train_kwargs"),
     }
 
 
@@ -137,9 +136,9 @@ def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
     RF-DETR tries to copy it into checkpoint_best_total.pth.
 
     We patch rfdetr.main.BestMetricHolder for the duration of training so the
-    first evaluation is always treated as "best" (init_res = -inf). This is not a
-    fallback to a different model; it makes the canonical output artifact
-    deterministic and prevents silent substitution.
+    first evaluation is always treated as "best" (init_res = -inf). It does not
+    substitute another model; it makes the canonical output artifact
+    deterministic.
     """
 
     import rfdetr.main as rfdetr_main
@@ -164,16 +163,6 @@ def _patched_rfdetr_best_metric_holder(*, init_res: float) -> None:
         rfdetr_main.BestMetricHolder = original_symbol  # type: ignore[assignment]
 
 
-def _resolve_required_checkpoint(path_like: str | Path | None) -> Path:
-    if not path_like:
-        raise ValueError(
-            "RF-DETR training requires a resolved local checkpoint path. "
-            "Run bootstrap first or check models.<key>.asset_id / cache_dir."
-        )
-    checkpoint = resolve_workspace_path(path_like)
-    return require_bootstrapped_file(checkpoint, label="Resolved RF-DETR checkpoint")
-
-
 def _normalize_rfdetr_resolution(
     model_variant: str,
     resolution: int | None,
@@ -195,14 +184,10 @@ def _normalize_rfdetr_resolution(
         resolution = int(shared_image_size)
     divisor = divisors[variant]
     if resolution % divisor != 0:
-        adjusted = (resolution // divisor) * divisor
-        if adjusted < divisor:
-            adjusted = divisor
-        print(
-            f"Warning: RF-DETR resolution {resolution} is not divisible by {divisor}. "
-            f"Using {adjusted}."
+        raise ValueError(
+            f"RF-DETR resolution {resolution} is not divisible by {divisor} "
+            f"for variant {model_variant!r}."
         )
-        resolution = adjusted
     return int(resolution)
 
 
@@ -239,62 +224,7 @@ def _get_rfdetr_model(
         init_kwargs["resolution"] = int(resolution)
     if gradient_checkpointing is not None:
         init_kwargs["gradient_checkpointing"] = bool(gradient_checkpointing)
-    return model_cls(**init_kwargs) if init_kwargs else model_cls()
-
-
-def train_rfdetr(
-    dataset_dir: Path,
-    output_root: Path,
-    experiment_name: str | None,
-    model_variant: str,
-    epochs: int,
-    batch_size: int,
-    grad_accum_steps: int,
-    lr: float | None,
-    resolution: int,
-    checkpoint_path: str | None = None,
-    gradient_checkpointing: bool | None = None,
-    extra_train_kwargs: dict | None = None,
-):
-    """Train an RF-DETR model using the Roboflow dataset loader.
-
-    RF-DETR's ``dataset_file='roboflow'`` mode auto-detects either COCO-style
-    or YOLO-style exports under ``dataset_dir``. Our pipeline supplies a YOLO
-    layout bridge (data.yaml + train/valid/test image+label dirs).
-    """
-    run_name = experiment_name or "rfdetr-train"
-    output_dir = resolve_unique_run_dir(output_root, run_name)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    checkpoint = _resolve_required_checkpoint(checkpoint_path)
-
-    model = _get_rfdetr_model(
-        model_variant,
-        checkpoint_path=str(checkpoint),
-        device=device,
-        resolution=resolution,
-        gradient_checkpointing=gradient_checkpointing,
-    )
-
-    train_kwargs: dict[str, object] = {
-        "dataset_dir": str(dataset_dir),
-        "dataset_file": "roboflow",
-        "epochs": int(epochs),
-        "batch_size": int(batch_size),
-        "grad_accum_steps": int(grad_accum_steps),
-        "output_dir": str(output_dir),
-        "resolution": int(resolution),
-        "run_test": True,
-    }
-    if lr is not None:
-        train_kwargs["lr"] = float(lr)
-    if extra_train_kwargs:
-        train_kwargs.update(extra_train_kwargs)
-
-    with _patched_rfdetr_best_metric_holder(init_res=float("-inf")):
-        model.train(**train_kwargs)
-    return model, output_dir
+    return model_cls(**init_kwargs)
 
 
 def _save_rfdetr_weights(output_dir: Path) -> None:
@@ -330,9 +260,6 @@ def _prepare_rfdetr_yolo_layout(training_path: Path, test_path: Path, dataset_na
     """
     base_dir = Path(".tmp") / "rfdetr_datasets"
     output_dir = base_dir / safe_dataset_dirname(str(dataset_name))
-    # Defensive check: ensure output_dir cannot escape base_dir.
-    if not output_dir.resolve(strict=False).is_relative_to(base_dir.resolve(strict=False)):
-        raise ValueError(f"Unsafe dataset_name for RF-DETR export dir: {dataset_name!r}")
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -345,9 +272,11 @@ def _prepare_rfdetr_yolo_layout(training_path: Path, test_path: Path, dataset_na
     # RF-DETR looks for data.yaml (not dataset.yaml)
     src_yaml = training_path / "dataset.yaml"
     with open(src_yaml, "r", encoding="utf-8") as f:
-        ds_cfg = yaml.safe_load(f) or {}
+        ds_cfg = yaml.safe_load(f)
+    if not isinstance(ds_cfg, dict):
+        raise ValueError(f"Invalid dataset YAML at {src_yaml}: expected mapping, got {type(ds_cfg)}")
 
-    names_raw = ds_cfg.get("names", [])
+    names_raw = ds_cfg["names"]
     if isinstance(names_raw, dict):
         names_list = [names_raw[k] for k in sorted(names_raw.keys(), key=lambda x: int(x))]
     else:
@@ -376,7 +305,7 @@ def train_backend(
 ) -> tuple[object, Path, str, int, int]:
     """Train RF-DETR and return an Ultralytics-compatible model adapter."""
 
-    from object_detector_trainer.evaluation.validate import get_dataset_classes
+    from object_detector_trainer.datasets.yolo_yaml import get_dataset_classes
     from object_detector_trainer.wrappers.rfdetr import RFDETRModelAdapter
 
     rfdetr_variant = resolved_cfg["rfdetr_variant"]
@@ -392,9 +321,12 @@ def train_backend(
 
     rfdetr_lr = resolved_cfg.get("rfdetr_lr")
     rfdetr_resolution = int(resolved_cfg["rfdetr_resolution"])
-    rfdetr_checkpoint = resolved_cfg.get("rfdetr_checkpoint")
+    rfdetr_checkpoint = resolve_workspace_path(resolved_cfg["rfdetr_checkpoint"])
+    rfdetr_checkpoint = require_bootstrapped_file(
+        rfdetr_checkpoint,
+        label="Resolved RF-DETR checkpoint",
+    )
     rfdetr_grad_ckpt = resolved_cfg.get("rfdetr_grad_ckpt")
-    rfdetr_extra = resolved_cfg.get("rfdetr_extra")
 
     # Prepare a lightweight YOLO-format directory layout for RF-DETR.
     # RF-DETR 1.4+ auto-detects YOLO format (data.yaml + train/images/).
@@ -405,24 +337,37 @@ def train_backend(
     )
     rfdetr_dataset_dir = rfdetr_export_dir
 
-    runs_root = Path("runs")
+    runs_root = Path(str(resolved_cfg.get("runs_root", "runs")))
     runs_root.mkdir(parents=True, exist_ok=True)
     display_name = f"{(experiment_name or resolved_cfg['model_key'])}-rfdetr-{rfdetr_variant}"
 
-    rfdetr_model, train_output_dir = train_rfdetr(
-        dataset_dir=rfdetr_dataset_dir,
-        output_root=runs_root,
-        experiment_name=display_name,
-        model_variant=rfdetr_variant,
-        epochs=rfdetr_epochs,
-        batch_size=rfdetr_batch_size,
-        grad_accum_steps=rfdetr_grad_accum,
-        lr=float(rfdetr_lr) if rfdetr_lr is not None else None,
+    train_output_dir = resolve_unique_run_dir(runs_root, display_name)
+    train_output_dir.mkdir(parents=True, exist_ok=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rfdetr_model = _get_rfdetr_model(
+        rfdetr_variant,
+        checkpoint_path=str(rfdetr_checkpoint),
+        device=device,
         resolution=rfdetr_resolution,
-        checkpoint_path=str(rfdetr_checkpoint) if rfdetr_checkpoint is not None else None,
         gradient_checkpointing=rfdetr_grad_ckpt,
-        extra_train_kwargs=rfdetr_extra if isinstance(rfdetr_extra, dict) else None,
     )
+
+    train_kwargs: dict[str, object] = {
+        "dataset_dir": str(rfdetr_dataset_dir),
+        "dataset_file": "roboflow",
+        "epochs": rfdetr_epochs,
+        "batch_size": rfdetr_batch_size,
+        "grad_accum_steps": rfdetr_grad_accum,
+        "output_dir": str(train_output_dir),
+        "resolution": rfdetr_resolution,
+        "run_test": True,
+    }
+    if rfdetr_lr is not None:
+        train_kwargs["lr"] = float(rfdetr_lr)
+
+    with _patched_rfdetr_best_metric_holder(init_res=float("-inf")):
+        rfdetr_model.train(**train_kwargs)
 
     _save_rfdetr_weights(train_output_dir)
 

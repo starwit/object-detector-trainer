@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from typing import NamedTuple
 
-from object_detector_trainer.dataprep.dataset_builder import process_single_images
+from object_detector_trainer.dataprep.dataset_builder import create_dataset_from_raw, process_single_images
 
 
 class SourceDataset(NamedTuple):
@@ -106,3 +106,90 @@ def test_process_single_images(tmp_path: Path, source_dataset: SourceDataset):
             assert content == "", f"Label for {image_file.name} should be empty"
         else:
             assert content != "", f"Label for {image_file.name} should not be empty"
+
+
+def _write_labeled_image(images_dir: Path, labels_dir: Path, stem: str, seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    image = rng.integers(0, 255, (96, 96, 3), dtype=np.uint8)
+    cv2.rectangle(image, (8, 8), (40 + seed, 40), (255, 50 + seed, 20), -1)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(images_dir / f"{stem}.jpg"), image)
+    (labels_dir / f"{stem}.txt").write_text("0 0.5 0.5 0.25 0.25\n", encoding="utf-8")
+
+
+def test_create_dataset_fails_when_validation_split_has_no_frames(tmp_path: Path) -> None:
+    train_raw = tmp_path / "raw_data" / "train"
+    images_dir = train_raw / "manual" / "images"
+    labels_dir = train_raw / "manual" / "labels"
+    _write_labeled_image(images_dir, labels_dir, "one_image", 1)
+
+    with pytest.raises(ValueError, match="0 validation frames"):
+        create_dataset_from_raw(
+            dataset_path=tmp_path / "datasets" / "waste",
+            training_path=tmp_path / "datasets" / "waste" / "train",
+            test_path=tmp_path / "datasets" / "waste" / "test",
+            train_image_input_path=train_raw,
+            test_image_input_path=tmp_path / "raw_data" / "test",
+            val_split=0.25,
+            test_split=0.25,
+            augment_multiplier=1,
+            custom_classes=["waste"],
+            use_coco_classes=False,
+            folder_subsets={},
+            class_mapping_config={},
+            test_data_exists=False,
+            recreate_dataset=True,
+        )
+
+
+def test_create_dataset_rejects_splits_that_leave_no_training_frames(tmp_path: Path) -> None:
+    train_raw = tmp_path / "raw_data" / "train"
+    images_dir = train_raw / "manual" / "images"
+    labels_dir = train_raw / "manual" / "labels"
+    for index in range(4):
+        _write_labeled_image(images_dir, labels_dir, f"image_{index}", index)
+
+    with pytest.raises(ValueError, match=r"val_split \+ prepare.test_split must be < 1"):
+        create_dataset_from_raw(
+            dataset_path=tmp_path / "datasets" / "waste",
+            training_path=tmp_path / "datasets" / "waste" / "train",
+            test_path=tmp_path / "datasets" / "waste" / "test",
+            train_image_input_path=train_raw,
+            test_image_input_path=tmp_path / "raw_data" / "test",
+            val_split=0.8,
+            test_split=0.2,
+            augment_multiplier=1,
+            custom_classes=["waste"],
+            use_coco_classes=False,
+            folder_subsets={},
+            class_mapping_config={},
+            test_data_exists=False,
+            recreate_dataset=True,
+        )
+
+
+def test_create_dataset_fails_when_full_pipeline_has_no_test_frames(tmp_path: Path) -> None:
+    train_raw = tmp_path / "raw_data" / "train"
+    images_dir = train_raw / "manual" / "images"
+    labels_dir = train_raw / "manual" / "labels"
+    for index in range(4):
+        _write_labeled_image(images_dir, labels_dir, f"image_{index}", index)
+
+    with pytest.raises(ValueError, match="0 test frames"):
+        create_dataset_from_raw(
+            dataset_path=tmp_path / "datasets" / "waste",
+            training_path=tmp_path / "datasets" / "waste" / "train",
+            test_path=tmp_path / "datasets" / "waste" / "test",
+            train_image_input_path=train_raw,
+            test_image_input_path=tmp_path / "raw_data" / "test",
+            val_split=0.25,
+            test_split=0.0,
+            augment_multiplier=1,
+            custom_classes=["waste"],
+            use_coco_classes=False,
+            folder_subsets={},
+            class_mapping_config={},
+            test_data_exists=False,
+            recreate_dataset=True,
+        )

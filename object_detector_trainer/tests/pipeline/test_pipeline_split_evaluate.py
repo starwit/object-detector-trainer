@@ -141,7 +141,7 @@ def split_eval_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 def _patch_rfdetr_train(monkeypatch: pytest.MonkeyPatch) -> Path:
-    run_dir = Path("runs") / "split-reload-rfdetr"
+    run_dir = Path(".dvc_artifacts") / "train_runs" / "split-reload-rfdetr"
 
     def _fake_train_backend(
         *,
@@ -186,7 +186,7 @@ def _patch_rfdetr_reload(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, 
 
 
 def _patch_rtmdet_train(monkeypatch: pytest.MonkeyPatch) -> Path:
-    run_dir = Path("runs") / "split-reload-rtmdet"
+    run_dir = Path(".dvc_artifacts") / "train_runs" / "split-reload-rtmdet"
 
     def _fake_train_backend(
         *,
@@ -321,7 +321,7 @@ def test_split_evaluate_reloads_trained_backend_model(
     run_train_stage(args)
     assert best_weights_path.exists()
     marker_payload = json.loads(
-        (workspace / "runs" / ".last_train_result.json").read_text(encoding="utf-8")
+        (workspace / ".dvc_artifacts" / "last_train_result.json").read_text(encoding="utf-8")
     )
     assert marker_payload.get("reload_metadata", {}).get("model_backend") == backend_key
 
@@ -331,11 +331,11 @@ def test_split_evaluate_reloads_trained_backend_model(
     assert str(best_weights_path) not in StubYOLO.recorded_models
     _assert_summary_only(workspace / "results_comparison")
     assert (workspace / "metrics.json").exists()
-    run_dir = Path(marker_payload["train_output_dir"])
-    assert (run_dir / "metadata.yaml").exists()
-    assert (run_dir / "results.csv").exists()
-    assert (run_dir / "results.txt").exists()
-    assert (run_dir / "plots").is_dir()
+    published_run_dir = workspace / "runs" / Path(marker_payload["train_output_dir"]).name
+    assert (published_run_dir / "metadata.yaml").exists()
+    assert (published_run_dir / "results.csv").exists()
+    assert (published_run_dir / "results.txt").exists()
+    assert (published_run_dir / "plots").is_dir()
 
 
 def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
@@ -370,7 +370,7 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
 
     run_prepare_stage(args)
 
-    run_dir = Path("runs") / "split-baseline-check"
+    run_dir = Path(".dvc_artifacts") / "train_runs" / "split-baseline-check"
 
     def _fake_train_backend(
         *,
@@ -406,6 +406,15 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
     captured: dict[str, str] = {}
 
     def _fake_load_model_from_weights(path_candidate, metadata_override=None):
+        if metadata_override is None:
+            captured["baseline_weights_path"] = str(path_candidate)
+            model = _StubEvalModel(
+                model_name="baseline",
+                model_backend="yolo",
+                resolution=320,
+            )
+            return model, "baseline"
+
         model = _StubEvalModel(
             model_name="yolo-trained-reloaded",
             model_backend="yolo",
@@ -413,28 +422,16 @@ def test_split_evaluate_uses_current_baseline_path_and_keeps_runs_immutable(
         )
         return model, "yolo-trained-reloaded"
 
-    def _fake_resolve_baseline_model(baseline_weights_path: str | None):
-        captured["baseline_weights_path"] = str(baseline_weights_path)
-        model = _StubEvalModel(
-            model_name="baseline",
-            model_backend="yolo",
-            resolution=320,
-        )
-        return model, "baseline"
-
     monkeypatch.setattr(
         "object_detector_trainer.pipeline.evaluate_stage.load_model_from_weights",
         _fake_load_model_from_weights,
-    )
-    monkeypatch.setattr(
-        "object_detector_trainer.pipeline.evaluate_stage.resolve_baseline_model",
-        _fake_resolve_baseline_model,
     )
 
     run_evaluate_stage(args, train_result=None)
 
     assert Path(captured["baseline_weights_path"]).resolve() == baseline_b.resolve()
-    assert (run_dir / "metadata.yaml").exists()
-    assert (run_dir / "results.csv").exists()
-    assert (run_dir / "results.txt").exists()
+    published_run_dir = workspace / "runs" / run_dir.name
+    assert (published_run_dir / "metadata.yaml").exists()
+    assert (published_run_dir / "results.csv").exists()
+    assert (published_run_dir / "results.txt").exists()
     _assert_summary_only(workspace / "results_comparison")

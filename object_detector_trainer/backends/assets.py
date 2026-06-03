@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,7 +42,7 @@ def download_yolo_checkpoint(checkpoint_path: Path) -> Path:
     if (
         downloaded_path.resolve() != checkpoint_path.resolve()
         and downloaded_path.parent == Path.cwd()
+        and downloaded_path.exists()
     ):
-        with suppress(FileNotFoundError):
-            downloaded_path.unlink()
+        downloaded_path.unlink()
     return checkpoint_path
