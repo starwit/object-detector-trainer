@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+build/
+dist/
+/.tmp/
+/runs/
+/datasets/
+/raw_data/
+/models/
+/metrics.json
+/results_comparison/
+
+# model artifacts (never track weights in git)
+*.pt
+*.pth

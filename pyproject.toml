@@ -1,0 +1,55 @@
+[tool.poetry]
+name = "object-detector-trainer"
+version = "0.1.0"
+description = "Reusable multi-backend object detection training core"
+authors = ["edblu1"]
+license = "AGPL-3.0-only"
+readme = "README.md"
+packages = [{ include = "object_detector_trainer" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+albumentations = ">=1.4.10"
+imagehash = ">=4.3.1"
+matplotlib = ">=3.9.0"
+numpy = ">=2.2.0"
+opencv-python = ">=4.10.0.84"
+pandas = ">=2.2.3"
+pillow = ">=11.0.0"
+pycocotools = ">=2.0.11"
+pydantic = ">=2.11.0"
+pyyaml = ">=6.0.2"
+rfdetr = ">=1.4.1"
+ruamel-yaml = ">=0.18.14"
+scikit-image = ">=0.25.0"
+scikit-learn = ">=1.5.0"
+supervision = ">=0.22.0"
+tabulate = ">=0.9.0"
+torch = ">=2.0.0"
+tqdm = ">=4.67.1"
+ultralytics = "8.3.191"
+
+mmdet = { version = ">=3.3.0,<3.4.0", optional = true }
+mmengine = { version = ">=0.10.7,<0.11.0", optional = true }
+openmim = { version = ">=0.3.9", optional = true }
+setuptools = { version = ">=68.0.0,<82.0.0", optional = true }
+
+[tool.poetry.extras]
+rtmdet = ["mmdet", "mmengine", "openmim", "setuptools"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.2.0"
+
+[tool.poetry.scripts]
+object-detector-trainer = "object_detector_trainer.cli:main"
+
+[tool.pytest.ini_options]
+markers = [
+  "heavy: opt-in integration tests (real backend training; first run may download model assets)",
+]
+testpaths = ["object_detector_trainer/tests"]
+norecursedirs = [".venv", "venv", "site-packages"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
