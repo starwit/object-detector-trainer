@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "object-detector-trainer"
-version = "0.1.0"
+version = "1.0.0"
 description = "Reusable multi-backend object detection training core"
 authors = ["edblu1"]
 license = "AGPL-3.0-only"
