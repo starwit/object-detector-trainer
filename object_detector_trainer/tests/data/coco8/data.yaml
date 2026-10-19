@@ -1,0 +1,5 @@
+path: .
+names: [object, person]
+Train: Train.txt
+Validation: Validation.txt
+Test: Test.txt
